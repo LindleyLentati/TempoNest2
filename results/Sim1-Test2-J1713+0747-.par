@@ -1,0 +1,23 @@
+PSRJ           J1713+0747
+RAJ             17:13:49.5325448886        
+DECJ           +07:47:37.4999273108        
+F0             218.81184044143725784       
+F1             -4.0841995052503689486e-16   
+PEPOCH         54312                       
+POSEPOCH       54312                       
+DMEPOCH        54312                       
+DM             16.000092549352775289       
+START          53453.032680593605619       
+FINISH         53453.034680601092987       
+TZRMJD         53453.033680586555548       
+TZRFRQ         1477                     
+TZRSITE        7   
+TRES           0.810        
+EPHVER         5                           
+CLK            TT(TAI)
+MODE 1
+CORRECT_TROPOSPHERE  N
+EPHEM          DE414
+NITS           1
+NTOA           3
+CHI2R          0.6175 2
