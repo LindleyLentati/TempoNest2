@@ -246,7 +246,7 @@ sampler = ptmcmc.PTSampler(ndim=n_params,logl=MarginLogLike,logp=my_prior,
                             cov=np.diag(cov_diag**2),
                             outDir='./chains/',
                             resume=True)
-sampler.sample(p0=x0,Niter=20000,isave=10,burn=1000,thin=1,neff=1000)
+sampler.sample(p0=x0,Niter=2000,isave=10,burn=1000,thin=1,neff=1000)
 
 
 chains=np.loadtxt('./chains/chain_1.txt').T
