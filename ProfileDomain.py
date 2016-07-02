@@ -138,12 +138,15 @@ def MarginLogLike(x):
         '''Need to wrap phase for each of the Gaussian components separately.  Fortran style code incoming'''
                 
         BinTimes = x-ModelBats[i]
+	BinTimes[BinTimes > maxpos-ModelBats[i]] = BinTimes[BinTimes > maxpos-ModelBats[i]] - FoldingPeriodDays
+	BinTimes[BinTimes < minpos-ModelBats[i]] = BinTimes[BinTimes < minpos-ModelBats[i]] + FoldingPeriodDays
+	'''
         for j in range(Nbins):
             if(BinTimes[j] < minpos-ModelBats[i]):
                 BinTimes[j] = ProfileEndBat-ModelBats[i]+(j+1)*ProfileInfo[i,3]
             elif(BinTimes[j] > maxpos-ModelBats[i]):
                  BinTimes[j] = ProfileStartBat-ModelBats[i]-(Nbins-j)*ProfileInfo[i,3]
-                
+        '''     
          ###   for j in range(Nbins):
             #        print i, j, x[j]-ModelBats[i], ReferencePeriod/SECDAY/2, abs(x[j]-ModelBats[i]) < ReferencePeriod/SECDAY/2, BinTimes[j]
             
@@ -151,12 +154,15 @@ def MarginLogLike(x):
         
         
         BinTimes = x-ModelBats[i]-gsep
+	BinTimes[BinTimes > maxpos-ModelBats[i]-gsep] = BinTimes[BinTimes > maxpos-ModelBats[i]-gsep] - FoldingPeriodDays
+        BinTimes[BinTimes < minpos-ModelBats[i]-gsep] = BinTimes[BinTimes < minpos-ModelBats[i]-gsep] + FoldingPeriodDays
+	'''
         for j in range(Nbins):
             if(BinTimes[j] < minpos-ModelBats[i]-gsep):
                 BinTimes[j] = ProfileEndBat-ModelBats[i]-gsep+(j+1)*ProfileInfo[i,3]
             elif(BinTimes[j] > maxpos-ModelBats[i]-gsep):
                  BinTimes[j] = ProfileStartBat-ModelBats[i]-gsep-(Nbins-j)*ProfileInfo[i,3]
-                 
+           '''      
                  
         s += g2amp*np.exp(-0.5*(BinTimes)**2/g2width**2)
         
