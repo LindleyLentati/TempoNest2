@@ -6,15 +6,39 @@ import matplotlib.pyplot as plt
 import PTMCMCSampler
 from PTMCMCSampler import PTMCMCSampler as ptmcmc
 
+#Fcuntion to determine an estimate of the white noise in the profile data
+def GetProfNoise(profamps):
+
+	Nbins = len(profamps)
+	Step=100
+	noiselist=[]
+	for i in range(Nbins-Step):
+		noise=np.std(profamps[i:i+Step])
+		noiselist.append(noise)
+	noiselist=np.array(noiselist)
+	minnoise=np.min(noiselist)
+	threesiglist=noiselist[noiselist<3*minnoise]
+	mediannoise=np.median(threesiglist)
+	return mediannoise
+
 SECDAY = 24*60*60
 
 #First load pulsar.  We need the sats (separate day/second), and the file names of the archives (FNames)
 psr = T.tempopulsar(parfile="OneEpoch.par", timfile = "OneEpoch.tim")
+psr.fit()
 SatSecs = psr.satSec()
 SatDays = psr.satDay()
 FNames = psr.fnames()
 NToAs = psr.nobs
 
+
+#Check how many timing model parameters we are fitting for (in addition to phase)
+numTime=len(psr.pars())
+TempoPriors=np.zeros([numTime,2]).astype(np.float128)
+for i in range(numTime):
+        TempoPriors[i][0]=psr[psr.pars()[i]].val
+        TempoPriors[i][1]=psr[psr.pars()[i]].err
+	print "fitting for: ", psr.pars()[i], TempoPriors[i][0], TempoPriors[i][1]
 
 #Now loop through archives, and work out what subint/frequency channel is associated with a ToA.
 #Store whatever meta data is needed (MJD of the bins etc)
@@ -72,8 +96,9 @@ while(profcount < NToAs):
                 profamps = prof.get_amps()
                 
                 if(np.sum(profamps) != 0 and abs(toafreq-chanfreq) < 0.001):
+		    noiselevel=GetProfNoise(profamps)
                     ProfileData.append(profamps)
-                    ProfileInfo.append([SatSecs[profcount], SatDays[profcount], np.float128(intsec)+np.float128(fracsecs), pulsesamplerate, nbins, foldingperiod])                    
+                    ProfileInfo.append([SatSecs[profcount], SatDays[profcount], np.float128(intsec)+np.float128(fracsecs), pulsesamplerate, nbins, foldingperiod, noiselevel])                    
                     print "ChanInfo:", j, chanfreq, toafreq
                     profcount += 1
                     if(profcount == NToAs):
@@ -98,13 +123,18 @@ def MarginLogLike(x):
     ReferencePeriod = ProfileInfo[0][5]
     FoldingPeriodDays = ReferencePeriod/SECDAY
     phase=x[0]*ReferencePeriod/SECDAY
+    TimingParameters=np.float128(x[1:numTime+1])
+
+    pcount = numTime+1
+
+    gsep=x[pcount+0]*ReferencePeriod/SECDAY/1024
+    g1width=x[pcount+1]*ReferencePeriod/SECDAY/1024
+    g2width=x[pcount+2]*ReferencePeriod/SECDAY/1024
+    g2amp=x[pcount+3]
+
+    for i in range(numTime):
+        psr[psr.pars()[i]].val = TempoPriors[i][0] + TempoPriors[i][1]*TimingParameters[i]
     
-    gsep=x[1]*ReferencePeriod/SECDAY/1024
-    g1width=x[2]*ReferencePeriod/SECDAY/1024
-    g2width=x[3]*ReferencePeriod/SECDAY/1024
-    g2amp=x[4]
-    
-    pnoise = 4
     
     toas=psr.toas()
     residuals = psr.residuals(removemean=False)
@@ -177,7 +207,9 @@ def MarginLogLike(x):
         M=np.ones([2,Nbins])
         M[1] = s
         
-        
+
+	pnoise = ProfileInfo[i][6]
+ 
         MNM = np.dot(M, M.T)      
         MNM /= (pnoise*pnoise)
         
@@ -216,6 +248,8 @@ def MarginLogLike(x):
 
 parameters = []
 parameters.append('Phase')
+for i in range(numTime):
+	parameters.append(psr.pars()[i])
 parameters.append('GSep')
 parameters.append('G1Width')
 parameters.append('G2Width')
@@ -234,17 +268,24 @@ pmax = np.array(np.ones(n_params))*1024
 x0 = np.array(np.zeros(n_params))
 
 x0[0] = -6.30581674e-01
-x0[1] = 9.64886554e+01
-x0[2] = 3.12774568e+01
-x0[3] = 2.87192467e+01
-x0[4] = 1.74380328e+00
+for i in range(numTime):
+	x0[1+i] = 0
+
+pcount=numTime+1
+x0[pcount+0] = 9.64886554e+01
+x0[pcount+1] = 3.12774568e+01
+x0[pcount+2] = 2.87192467e+01
+x0[pcount+3] = 1.74380328e+00
 
 cov_diag = np.array(np.ones(n_params))
 cov_diag[0] = 0.000115669002113
-cov_diag[1] = 0.107382829786
-cov_diag[2] = 0.148923616311
-cov_diag[3] = 0.0672450249764
-cov_diag[4] = 0.00524526749377
+for i in range(numTime):
+        cov_diag[1+i] = 1
+pcount=numTime+1
+cov_diag[pcount+0] = 0.107382829786
+cov_diag[pcount+1] = 0.148923616311
+cov_diag[pcount+2] = 0.0672450249764
+cov_diag[pcount+3] = 0.00524526749377
 
 
 doplot=False
