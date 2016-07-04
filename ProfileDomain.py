@@ -7,7 +7,7 @@ import mpi4py
 import PTMCMCSampler
 from PTMCMCSampler import PTMCMCSampler as ptmcmc
 
-#Fcuntion to determine an estimate of the white noise in the profile data
+#Funtion to determine an estimate of the white noise in the profile data
 def GetProfNoise(profamps):
 
 	Nbins = len(profamps)
