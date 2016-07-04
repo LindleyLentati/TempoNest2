@@ -3,6 +3,7 @@ import psrchive
 from libstempo.libstempo import *
 import libstempo as T
 import matplotlib.pyplot as plt
+import mpi4py
 import PTMCMCSampler
 from PTMCMCSampler import PTMCMCSampler as ptmcmc
 
@@ -34,10 +35,11 @@ NToAs = psr.nobs
 
 #Check how many timing model parameters we are fitting for (in addition to phase)
 numTime=len(psr.pars())
+redChisq = psr.chisq()/(psr.nobs-len(psr.pars())-1)
 TempoPriors=np.zeros([numTime,2]).astype(np.float128)
 for i in range(numTime):
         TempoPriors[i][0]=psr[psr.pars()[i]].val
-        TempoPriors[i][1]=psr[psr.pars()[i]].err
+        TempoPriors[i][1]=psr[psr.pars()[i]].err/np.sqrt(redChisq)
 	print "fitting for: ", psr.pars()[i], TempoPriors[i][0], TempoPriors[i][1]
 
 #Now loop through archives, and work out what subint/frequency channel is associated with a ToA.
@@ -128,8 +130,8 @@ def MarginLogLike(x):
     pcount = numTime+1
 
     gsep=x[pcount+0]*ReferencePeriod/SECDAY/1024
-    g1width=x[pcount+1]*ReferencePeriod/SECDAY/1024
-    g2width=x[pcount+2]*ReferencePeriod/SECDAY/1024
+    g1width=np.float64(x[pcount+1]*ReferencePeriod/SECDAY/1024)
+    g2width=np.float64(x[pcount+2]*ReferencePeriod/SECDAY/1024)
     g2amp=x[pcount+3]
 
     for i in range(numTime):
@@ -138,15 +140,17 @@ def MarginLogLike(x):
     
     toas=psr.toas()
     residuals = psr.residuals(removemean=False)
-    ModelBats = psr.satSec() + psr.batCorrs() - phase - residuals/SECDAY
+    BatCorrs = psr.batCorrs()
+    ModelBats = psr.satSec() + BatCorrs - phase - residuals/SECDAY
+
     
     loglike = 0
     for i in range(NToAs):
     
         '''Start by working out position in phase of the model arrival time'''
 
-        ProfileStartBat = ProfileInfo[i,2]/SECDAY + ProfileInfo[i,3]*0 + ProfileInfo[i,3]*0.5 + psr.batCorrs()[i]
-        ProfileEndBat = ProfileInfo[i,2]/SECDAY + ProfileInfo[i,3]*(ProfileInfo[i,4]-1) + ProfileInfo[i,3]*0.5 + psr.batCorrs()[i]
+        ProfileStartBat = ProfileInfo[i,2]/SECDAY + ProfileInfo[i,3]*0 + ProfileInfo[i,3]*0.5 + BatCorrs[i]
+        ProfileEndBat = ProfileInfo[i,2]/SECDAY + ProfileInfo[i,3]*(ProfileInfo[i,4]-1) + ProfileInfo[i,3]*0.5 + BatCorrs[i]
         
         #print ProfileStartBat, ModelBats[0], ProfileEndBat
         
@@ -170,6 +174,9 @@ def MarginLogLike(x):
         BinTimes = x-ModelBats[i]
 	BinTimes[BinTimes > maxpos-ModelBats[i]] = BinTimes[BinTimes > maxpos-ModelBats[i]] - FoldingPeriodDays
 	BinTimes[BinTimes < minpos-ModelBats[i]] = BinTimes[BinTimes < minpos-ModelBats[i]] + FoldingPeriodDays
+
+	BinTimes=np.float64(BinTimes)
+
 	'''
         for j in range(Nbins):
             if(BinTimes[j] < minpos-ModelBats[i]):
@@ -186,6 +193,9 @@ def MarginLogLike(x):
         BinTimes = x-ModelBats[i]-gsep
 	BinTimes[BinTimes > maxpos-ModelBats[i]-gsep] = BinTimes[BinTimes > maxpos-ModelBats[i]-gsep] - FoldingPeriodDays
         BinTimes[BinTimes < minpos-ModelBats[i]-gsep] = BinTimes[BinTimes < minpos-ModelBats[i]-gsep] + FoldingPeriodDays
+
+	BinTimes=np.float64(BinTimes)
+
 	'''
         for j in range(Nbins):
             if(BinTimes[j] < minpos-ModelBats[i]-gsep):
@@ -198,9 +208,11 @@ def MarginLogLike(x):
         
         '''Now subtract mean and scale so std is one.  Makes the matrix stuff stable.'''
       
-        
-        s=(s-np.mean(s))
-        s=s/np.std(s)
+        smean = np.sum(s)/Nbins 
+        s = s-smean
+	
+	sstd = np.dot(s,s)/Nbins
+        s=s/sstd
         
         '''Make design matrix.  Two components: baseline and profile shape.'''
 
@@ -289,14 +301,17 @@ cov_diag[pcount+3] = 0.00524526749377
 
 
 doplot=False
+burnin=1000
 sampler = ptmcmc.PTSampler(ndim=n_params,logl=MarginLogLike,logp=my_prior,
                             cov=np.diag(cov_diag**2),
                             outDir='./chains/',
                             resume=True)
-sampler.sample(p0=x0,Niter=2000,isave=10,burn=1000,thin=1,neff=1000)
+sampler.sample(p0=x0,Niter=10000,isave=10,burn=burnin,thin=1,neff=1000)
 
 
 chains=np.loadtxt('./chains/chain_1.txt').T
 ML=chains.T[np.argmax(chains[5])][:n_params]
-doplot=True
+doplot=False
+for i in range(n_params):
+	print "param:", i, np.mean(chains[i][burnin:]), np.std(chains[i][burnin:])
 MarginLogLike(ML)
