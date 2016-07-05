@@ -33,6 +33,7 @@ class ProfileLikelihood(object):
 
 		ProfileAmps=x[:NToAs]
 		ProfileBaselines=x[NToAs:2*NToAs]
+		ProfileNoise = x[2*NToAs:3*NToAs]
 		    
 		toas=psr.toas()
 		residuals = psr.residuals(removemean=False)
@@ -94,8 +95,12 @@ class ProfileLikelihood(object):
 
 			'''Now get likelihood for this profile'''
 
-			pnoise = ProfileInfo[i][6]
-			profilelike = -0.5*np.sum((ProfileData[i] - s*ProfileAmps[i] - ProfileBaselines[i])**2/pnoise/pnoise)
+			pnoise = ProfileNoise[i]
+
+			Presiduals = ProfileData[i] - s*ProfileAmps[i] - ProfileBaselines[i]
+			chisq = np.sum((Presiduals**2)/pnoise/pnoise)
+			detN = np.log(pnoise*pnoise)*Nbins
+			profilelike = -0.5*(chisq+detN)
 
 			#print ProfileAmps[i], ProfileBaselines[i], profilelike
 
@@ -118,7 +123,8 @@ class ProfileLikelihood(object):
 
 		ProfileAmps=x[:NToAs]
 		ProfileBaselines=x[NToAs:2*NToAs]
-		    
+		ProfileNoise = x[2*NToAs:3*NToAs]		    
+
 		toas=psr.toas()
 		residuals = psr.residuals(removemean=False)
 		BatCorrs = psr.batCorrs()
@@ -180,13 +186,18 @@ class ProfileLikelihood(object):
 
 			'''Now get likelihood for this profile'''
 
-			pnoise = ProfileInfo[i][6]
+			pnoise = ProfileNoise[i]
 			Presiduals = ProfileData[i] - s*ProfileAmps[i] - ProfileBaselines[i]
-			profilelike = -0.5*np.sum((Presiduals**2)/pnoise/pnoise)
+
+			chisq = np.sum((Presiduals**2)/pnoise/pnoise)
+			detN = np.log(pnoise*pnoise)*Nbins
+			profilelike = -0.5*(chisq+detN)
 
 			grad[i] = np.dot(s,Presiduals)/pnoise/pnoise
 			grad[i+NToAs] = np.dot(np.ones(Nbins),Presiduals)/pnoise/pnoise
+			grad[i+2*NToAs] = (chisq-Nbins)/pnoise
 
+		
 			#print ProfileAmps[i], ProfileBaselines[i], profilelike, grad 
 
 
@@ -227,7 +238,7 @@ class ProfileLikelihood(object):
 		ModelBats = psr.satSec() + BatCorrs - phase - residuals/SECDAY
 
     
-		ML=np.zeros(2*NToAs)
+		ML=np.zeros(3*NToAs)
 		for i in range(NToAs):
     
 			'''Start by working out position in phase of the model arrival time'''
@@ -307,11 +318,13 @@ class ProfileLikelihood(object):
 
 			baseline=dNMMNM[0]
 			amp = dNMMNM[1]
+			noise = np.std(ProfileData[i] - baseline - amp*s)
 
 			ML[i] = amp
 			ML[i+NToAs] = baseline
+			ML[i+2*NToAs] = noise
 
-			print "ML", amp, baseline, InvMNM[0][0], InvMNM[1][1]
+			print "ML", amp, baseline, noise
 
 		return ML
 
@@ -319,7 +332,9 @@ class ProfileLikelihood(object):
 	def hessian(self):
 		pnoise=ProfileInfo[:,6]**2
 		onehess=np.float64(ProfileInfo[:,4]/pnoise)
-		return np.diag(np.append(onehess,onehess))
+		noisehess = ProfileInfo[:,4]*(3.0/(ProfileInfo[:,6]*ProfileInfo[:,6]) - 1.0/(ProfileInfo[:,6]*ProfileInfo[:,6]))
+		diaghess = np.append(onehess,onehess)
+		return np.diag(np.append(diaghess, noisehess))
 
 
 
@@ -343,7 +358,7 @@ def GetProfNoise(profamps):
 SECDAY = 24*60*60
 
 #First load pulsar.  We need the sats (separate day/second), and the file names of the archives (FNames)
-psr = T.tempopulsar(parfile="OneProf.par", timfile = "OneProf.tim")
+psr = T.tempopulsar(parfile="OneProf.par", timfile = "OneEpoch.tim")
 psr.fit()
 SatSecs = psr.satSec()
 SatDays = psr.satDay()
@@ -433,6 +448,8 @@ for i in range(NToAs):
 	parameters.append('Amp'+str(i))
 for i in range(NToAs):
 	parameters.append('BL'+str(i))
+for i in range(NToAs):
+	parameters.append('Noise'+str(i))
 
 n_params = len(parameters)
 print n_params
@@ -449,20 +466,20 @@ Savex[4] = 1.74380328e+00
 pl = ProfileLikelihood(ndim=n_params)
 
 p0 = pl.ML()
-ndjac = nd.Jacobian(pl.lnlikefn)
-ndhess = nd.Hessian(pl.lnlikefn)
+#ndjac = nd.Jacobian(pl.lnlikefn)
+#ndhess = nd.Hessian(pl.lnlikefn)
 
 print p0
 print pl.lnlikefn_grad(p0)[1]
-print ndjac(p0)
+#aprint ndjac(p0)
 
-h0 = ndhess(p0)
-
-cov = sl.cho_solve(sl.cho_factor(-h0), np.eye(len(h0)))
+#h0 = ndhess(p0)
+hess=pl.hessian()
+cov = sl.cho_solve(sl.cho_factor(hess), np.eye(len(hess)))
 
 
 #cov=pl.hessian()
-cov=np.diag([0.01268191,0.01268191])
+#cov=np.diag([0.01268191,0.01268191, 0.08s])
 
 '''
 burnin=1000
