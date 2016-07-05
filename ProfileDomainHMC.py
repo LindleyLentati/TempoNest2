@@ -184,8 +184,8 @@ class ProfileLikelihood(object):
 			Presiduals = ProfileData[i] - s*ProfileAmps[i] - ProfileBaselines[i]
 			profilelike = -0.5*np.sum((Presiduals**2)/pnoise/pnoise)
 
-			grad[i] = -np.dot(s,Presiduals)/pnoise/pnoise
-			grad[i+NToAs] = -np.dot(np.ones(Nbins),Presiduals)/pnoise/pnoise
+			grad[i] = np.dot(s,Presiduals)/pnoise/pnoise
+			grad[i+NToAs] = np.dot(np.ones(Nbins),Presiduals)/pnoise/pnoise
 
 			#print ProfileAmps[i], ProfileBaselines[i], profilelike, grad 
 
@@ -474,11 +474,11 @@ sampler.sample(p0=p0,Niter=10000,isave=10,burn=burnin,thin=1,neff=1000)
 '''
 
 doplot=False
-burnin=100
+burnin=1000
 sampler = ptmcmc.PTSampler(n_params, pl.lnlikefn, pl.lnpriorfn, np.copy(cov),
                                   logl_grad=pl.lnlikefn_grad, logp_grad=pl.lnpriorfn_grad,
                                   outDir='./chains')
-sampler.sample(p0, 100, burn=burnin, thin=1,
+sampler.sample(p0, 10000, burn=burnin, thin=1,
                SCAMweight=10, AMweight=10, DEweight=10, NUTSweight=10, HMCweight=10, MALAweight=0,
                HMCsteps=50, HMCstepsize=0.08)
 
