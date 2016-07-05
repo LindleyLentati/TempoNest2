@@ -3,7 +3,6 @@ import psrchive
 from libstempo.libstempo import *
 import libstempo as T
 import matplotlib.pyplot as plt
-import mpi4py
 import PTMCMCSampler
 from PTMCMCSampler import PTMCMCSampler as ptmcmc
 
@@ -212,7 +211,7 @@ def MarginLogLike(x):
         s = s-smean
 	
 	sstd = np.dot(s,s)/Nbins
-        s=s/sstd
+        s=s/np.sqrt(sstd)
         
         '''Make design matrix.  Two components: baseline and profile shape.'''
 
