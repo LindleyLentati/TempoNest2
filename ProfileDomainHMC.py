@@ -358,7 +358,7 @@ def GetProfNoise(profamps):
 SECDAY = 24*60*60
 
 #First load pulsar.  We need the sats (separate day/second), and the file names of the archives (FNames)
-psr = T.tempopulsar(parfile="OneProf.par", timfile = "OneEpoch.tim")
+psr = T.tempopulsar(parfile="OneProf.par", timfile = "OneChan.tim")
 psr.fit()
 SatSecs = psr.satSec()
 SatDays = psr.satDay()
@@ -406,7 +406,7 @@ while(profcount < NToAs):
         inttime = subint.get_duration()
         centerfreq = subint.get_centre_frequency()
         
-        print "Subint Info:", i, nbins, nchans, npols, foldingperiod, inttime, centerfreq
+        #print "Subint Info:", i, nbins, nchans, npols, foldingperiod, inttime, centerfreq
         
         firstbin = subint.get_epoch()
         intday = firstbin.intday()
@@ -432,16 +432,16 @@ while(profcount < NToAs):
                 
                 if(np.sum(profamps) != 0 and abs(toafreq-chanfreq) < 0.001):
 		    noiselevel=GetProfNoise(profamps)
-                    ProfileData.append(profamps)
+                    ProfileData.append(np.copy(profamps))
                     ProfileInfo.append([SatSecs[profcount], SatDays[profcount], np.float128(intsec)+np.float128(fracsecs), pulsesamplerate, nbins, foldingperiod, noiselevel])                    
-                    print "ChanInfo:", j, chanfreq, toafreq
+                    #print "ChanInfo:", j, chanfreq, toafreq
                     profcount += 1
                     if(profcount == NToAs):
                         break
 
 len(ProfileData)
 ProfileInfo=np.array(ProfileInfo)
-
+ProfileData = np.array(ProfileData)
 
 parameters = []
 for i in range(NToAs):
@@ -491,11 +491,11 @@ sampler.sample(p0=p0,Niter=10000,isave=10,burn=burnin,thin=1,neff=1000)
 '''
 
 doplot=False
-burnin=1000
+burnin=100
 sampler = ptmcmc.PTSampler(n_params, pl.lnlikefn, pl.lnpriorfn, np.copy(cov),
                                   logl_grad=pl.lnlikefn_grad, logp_grad=pl.lnpriorfn_grad,
                                   outDir='./chains')
-sampler.sample(p0, 10000, burn=burnin, thin=1,
+sampler.sample(p0, 1000, burn=burnin, thin=1,
                SCAMweight=10, AMweight=10, DEweight=10, NUTSweight=10, HMCweight=10, MALAweight=0,
-               HMCsteps=50, HMCstepsize=0.08)
+               HMCsteps=10, HMCstepsize=0.4)
 

@@ -24,7 +24,7 @@ def GetProfNoise(profamps):
 SECDAY = 24*60*60
 
 #First load pulsar.  We need the sats (separate day/second), and the file names of the archives (FNames)
-psr = T.tempopulsar(parfile="OneEpoch.par", timfile = "OneEpoch.tim")
+psr = T.tempopulsar(parfile="OneChan.par", timfile = "OneChan.tim")
 psr.fit()
 SatSecs = psr.satSec()
 SatDays = psr.satDay()
@@ -98,15 +98,25 @@ while(profcount < NToAs):
                 
                 if(np.sum(profamps) != 0 and abs(toafreq-chanfreq) < 0.001):
 		    noiselevel=GetProfNoise(profamps)
-                    ProfileData.append(profamps)
+                    ProfileData.append(np.copy(profamps))
+
+
+		   # plt.plot(np.linspace(0,1,1024), ProfileData[0])
+		    #plt.plot(np.linspace(0,1,1024), s*(np.max(ProfileData[i])-np.min(ProfileData[i]))+np.min(ProfileData[i]))
+		   # plt.show()
+
+
                     ProfileInfo.append([SatSecs[profcount], SatDays[profcount], np.float128(intsec)+np.float128(fracsecs), pulsesamplerate, nbins, foldingperiod, noiselevel])                    
-                    print "ChanInfo:", j, chanfreq, toafreq
+                    print "ChanInfo:", j, chanfreq, toafreq, np.sum(profamps)
                     profcount += 1
                     if(profcount == NToAs):
                         break
 
+
 len(ProfileData)
 ProfileInfo=np.array(ProfileInfo)
+ProfileData=np.array(ProfileData)
+
 
 
 def my_prior(x):
@@ -118,6 +128,7 @@ def my_prior(x):
         logp = -np.inf
 
     return logp
+
 
 def MarginLogLike(x):
     
@@ -155,55 +166,52 @@ def MarginLogLike(x):
         
         #print "PDiff:", (ModelBats[0]-ProfileStartBat), (ModelBats[0]-ProfileStartBat)*24*60*60,  (ModelBats[0]-ProfileStartBat)*24*60*60*psr['F0'].val
         
-        #print psr.stoas[0], ModelBats[0], psr.satSec()[0], psr.batCorrs()[0], phase, residuals[0]
+        #print "MBAT:", psr.stoas[i], ModelBats[i], psr.satSec()[i], psr.batCorrs()[i], phase, residuals[i]
+	#print "BINPOS:", ModelBats[i], ProfileStartBat, ProfileEndBat
+
+	binpos = ModelBats[i]
+
+	if(binpos < ProfileStartBat):
+		binpos += FoldingPeriodDays
+
+	if(binpos > ProfileEndBat):
+		binpos -= FoldingPeriodDays
+
         Nbins = ProfileInfo[i,4]
         x=np.linspace(ProfileStartBat, ProfileEndBat, Nbins)
         
-        minpos = ModelBats[i] - FoldingPeriodDays/2
+        minpos = binpos - FoldingPeriodDays/2
         if(minpos < ProfileStartBat):
                 minpos=ProfileStartBat
                 
-        maxpos = ModelBats[i] + FoldingPeriodDays/2
+        maxpos = binpos + FoldingPeriodDays/2
         if(maxpos > ProfileEndBat):
                 maxpos = ProfileEndBat
                 
                 
-        '''Need to wrap phase for each of the Gaussian components separately.  Fortran style code incoming'''
+        '''Need to wrap phase for each of the Gaussian components separately'''
                 
-        BinTimes = x-ModelBats[i]
-	BinTimes[BinTimes > maxpos-ModelBats[i]] = BinTimes[BinTimes > maxpos-ModelBats[i]] - FoldingPeriodDays
-	BinTimes[BinTimes < minpos-ModelBats[i]] = BinTimes[BinTimes < minpos-ModelBats[i]] + FoldingPeriodDays
+        BinTimes = x-binpos
+	BinTimes[BinTimes > maxpos-binpos] = BinTimes[BinTimes > maxpos-binpos] - FoldingPeriodDays
+	BinTimes[BinTimes < minpos-binpos] = BinTimes[BinTimes < minpos-binpos] + FoldingPeriodDays
 
-	BinTimes=np.float64(BinTimes)
+	BinTimes=np.float64(BinTimes)/g1width
 
-	'''
-        for j in range(Nbins):
-            if(BinTimes[j] < minpos-ModelBats[i]):
-                BinTimes[j] = ProfileEndBat-ModelBats[i]+(j+1)*ProfileInfo[i,3]
-            elif(BinTimes[j] > maxpos-ModelBats[i]):
-                 BinTimes[j] = ProfileStartBat-ModelBats[i]-(Nbins-j)*ProfileInfo[i,3]
-        '''     
-         ###   for j in range(Nbins):
-            #        print i, j, x[j]-ModelBats[i], ReferencePeriod/SECDAY/2, abs(x[j]-ModelBats[i]) < ReferencePeriod/SECDAY/2, BinTimes[j]
-            
-        s = 1.0*np.exp(-0.5*(BinTimes)**2/g1width**2)
+
+        s = 1.0*np.exp(-0.5*(BinTimes)**2)
         
         
-        BinTimes = x-ModelBats[i]-gsep
-	BinTimes[BinTimes > maxpos-ModelBats[i]-gsep] = BinTimes[BinTimes > maxpos-ModelBats[i]-gsep] - FoldingPeriodDays
-        BinTimes[BinTimes < minpos-ModelBats[i]-gsep] = BinTimes[BinTimes < minpos-ModelBats[i]-gsep] + FoldingPeriodDays
+        BinTimes = x-binpos-gsep
+	BinTimes[BinTimes > maxpos-binpos-gsep] = BinTimes[BinTimes > maxpos-binpos-gsep] - FoldingPeriodDays
+        BinTimes[BinTimes < minpos-binpos-gsep] = BinTimes[BinTimes < minpos-binpos-gsep] + FoldingPeriodDays
 
-	BinTimes=np.float64(BinTimes)
-
-	'''
-        for j in range(Nbins):
-            if(BinTimes[j] < minpos-ModelBats[i]-gsep):
-                BinTimes[j] = ProfileEndBat-ModelBats[i]-gsep+(j+1)*ProfileInfo[i,3]
-            elif(BinTimes[j] > maxpos-ModelBats[i]-gsep):
-                 BinTimes[j] = ProfileStartBat-ModelBats[i]-gsep-(Nbins-j)*ProfileInfo[i,3]
-           '''      
+	BinTimes=np.float64(BinTimes)/g2width
                  
-        s += g2amp*np.exp(-0.5*(BinTimes)**2/g2width**2)
+        s += g2amp*np.exp(-0.5*(BinTimes)**2)
+
+	#plt.plot(np.linspace(0,1,1024), ProfileData[i])
+	#plt.plot(np.linspace(0,1,1024), s*(np.max(ProfileData[i])-np.min(ProfileData[i]))+np.min(ProfileData[i]))
+	#plt.show()
         
         '''Now subtract mean and scale so std is one.  Makes the matrix stuff stable.'''
       
@@ -251,6 +259,8 @@ def MarginLogLike(x):
         if(doplot == True):
             baseline=dNMMNM[0]
             amp = dNMMNM[1]
+	    noise = np.std(ProfileData[i] - baseline - amp*s)
+	    print i, amp, baseline, noise
             plt.plot(x, ProfileData[i])
             plt.plot(x,baseline+s*amp)
             plt.show()
@@ -310,7 +320,7 @@ sampler.sample(p0=x0,Niter=10000,isave=10,burn=burnin,thin=1,neff=1000)
 
 chains=np.loadtxt('./chains/chain_1.txt').T
 ML=chains.T[np.argmax(chains[5])][:n_params]
-doplot=False
+doplot=True
 for i in range(n_params):
 	print "param:", i, np.mean(chains[i][burnin:]), np.std(chains[i][burnin:])
 MarginLogLike(ML)
