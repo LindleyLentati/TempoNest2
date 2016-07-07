@@ -364,19 +364,6 @@ def hessian(useToAs):
 MLpoint = ML(useToAs)
 hess = hessian(useToAs)
 
-from pymc3 import HamiltonianMC, sample
-
-with basic_model:
-
-	# Use starting ML point
-	start = MLpoint
-
-	hess = hessian(useToAs)
-
-	#Set scaling using hessian
-	step = HamiltonianMC(scaling=basic_model.dict_to_array(hess), is_cov=True)
-	# draw 2000 posterior samples
-	trace = sample(2000, start=start)
 
 from pymc3 import NUTS, sample
 
@@ -397,3 +384,19 @@ from pymc3 import traceplot
 traceplot(trace);
 
 
+
+'''
+from pymc3 import HamiltonianMC, sample
+
+with basic_model:
+
+	# Use starting ML point
+	start = MLpoint
+
+	hess = hessian(useToAs)
+
+	#Set scaling using hessian
+	step = HamiltonianMC(scaling=basic_model.dict_to_array(hess), is_cov=True)
+	# draw 2000 posterior samples
+	trace = sample(2000, start=start)
+'''
