@@ -26,7 +26,7 @@ def GetProfNoise(profamps):
 SECDAY = 24*60*60
 
 #First load pulsar.  We need the sats (separate day/second), and the file names of the archives (FNames)
-psr = T.tempopulsar(parfile="OneProf.par", timfile = "OneChan.tim")
+psr = T.tempopulsar(parfile="OneChan.par", timfile = "OneChan.tim")
 psr.fit()
 SatSecs = psr.satSec()
 SatDays = psr.satDay()
@@ -37,11 +37,18 @@ NToAs = psr.nobs
 #Check how many timing model parameters we are fitting for (in addition to phase)
 numTime=len(psr.pars())
 redChisq = psr.chisq()/(psr.nobs-len(psr.pars())-1)
-TempoPriors=np.zeros([numTime,2]).astype(np.float128)
+TempoPriors=np.zeros([numTime,2]).astype(np.float64)
 for i in range(numTime):
         TempoPriors[i][0]=psr[psr.pars()[i]].val
         TempoPriors[i][1]=psr[psr.pars()[i]].err/np.sqrt(redChisq)
 	print "fitting for: ", psr.pars()[i], TempoPriors[i][0], TempoPriors[i][1]
+
+
+designMatrix=psr.designmatrix(incoffset=False)
+for i in range(numTime):
+	designMatrix[:,i] *= TempoPriors[i][1]
+
+designMatrix=np.float64(designMatrix)
 
 #Now loop through archives, and work out what subint/frequency channel is associated with a ToA.
 #Store whatever meta data is needed (MJD of the bins etc)
@@ -132,10 +139,10 @@ Savex[3] = 2.87192467e+01
 Savex[4] = 1.74380328e+00
 
 
-useToAs=100
+useToAs=10
 
 
-from pymc3 import Model, Normal, HalfNormal
+from pymc3 import Model, Normal, HalfNormal, Uniform, theano
 
 basic_model = Model()
 
@@ -145,20 +152,22 @@ with basic_model:
 	amplitude = Normal('amplitude', mu=0, sd=10000, shape = useToAs)
 	offset = Normal('offset', mu=0, sd=10000, shape = useToAs)
 	noise = HalfNormal('noise', sd=10000, shape = useToAs)
+	phase = Uniform('phase', lower = -1, upper = 1)
 
-	ReferencePeriod = ProfileInfo[0][5]
-	FoldingPeriodDays = ReferencePeriod/SECDAY
+	ReferencePeriod = np.float64(ProfileInfo[0][5])                     #This should be float128
+	FoldingPeriodDays = np.float64(ReferencePeriod/SECDAY)              #This should be  float128  
 
-	phase   = Savex[0]*ReferencePeriod/SECDAY
+	phase   = phase*ReferencePeriod/SECDAY
 	gsep    = Savex[1]*ReferencePeriod/SECDAY/1024
 	g1width = np.float64(Savex[2]*ReferencePeriod/SECDAY/1024)
 	g2width = np.float64(Savex[3]*ReferencePeriod/SECDAY/1024)
 	g2amp   = Savex[4]
 
-	toas=psr.toas()
-	residuals = psr.residuals(removemean=False)
-	BatCorrs = psr.batCorrs()
-	ModelBats = psr.satSec() + BatCorrs - phase - residuals/SECDAY
+
+	toas=psr.toas()                                                            		#All these things should be  float128
+	residuals = psr.residuals(removemean=False)				   		#All these things should be  float128
+	BatCorrs = psr.batCorrs()						  		#All these things should be  float128
+	ModelBats = np.float64(psr.satSec() + BatCorrs - phase - residuals/SECDAY)		#All these things should be  float128    	
 
 	loglike = 0
 	Y_obs = 0
@@ -166,44 +175,43 @@ with basic_model:
 
 		'''Start by working out position in phase of the model arrival time'''
 
-		ProfileStartBat = ProfileInfo[i,2]/SECDAY + ProfileInfo[i,3]*0 + ProfileInfo[i,3]*0.5 + BatCorrs[i]
-		ProfileEndBat = ProfileInfo[i,2]/SECDAY + ProfileInfo[i,3]*(ProfileInfo[i,4]-1) + ProfileInfo[i,3]*0.5 + BatCorrs[i]
+		ProfileStartBat = np.float64(ProfileInfo[i,2]/SECDAY + ProfileInfo[i,3]*0 + ProfileInfo[i,3]*0.5 + BatCorrs[i])
+		ProfileEndBat =  np.float64(ProfileInfo[i,2]/SECDAY + ProfileInfo[i,3]*(ProfileInfo[i,4]-1) + ProfileInfo[i,3]*0.5 + BatCorrs[i])
 
+		binpos = ModelBats[i] 
 
-		Nbins = ProfileInfo[i,4]
+		Nbins = np.int(ProfileInfo[i,4])
 		x=np.linspace(ProfileStartBat, ProfileEndBat, Nbins)
 
-		minpos = ModelBats[i] - FoldingPeriodDays/2
-		if(minpos < ProfileStartBat):
+		minpos = binpos - FoldingPeriodDays/2
+		if(theano.tensor.lt(minpos, ProfileStartBat)):
 			minpos=ProfileStartBat
 
-		maxpos = ModelBats[i] + FoldingPeriodDays/2
-		if(maxpos > ProfileEndBat):
+		maxpos =  binpos + FoldingPeriodDays/2
+		if(theano.tensor.lt(ProfileEndBat, maxpos)):
 			maxpos = ProfileEndBat
 
 
 		'''Need to wrap phase for each of the Gaussian components separately'''
 
-		BinTimes = x-ModelBats[i]
-		BinTimes[BinTimes > maxpos-ModelBats[i]] = BinTimes[BinTimes > maxpos-ModelBats[i]] - FoldingPeriodDays
-		BinTimes[BinTimes < minpos-ModelBats[i]] = BinTimes[BinTimes < minpos-ModelBats[i]] + FoldingPeriodDays
+		BinTimes = x-binpos
+		theano.tensor.set_subtensor(BinTimes[maxpos-binpos < BinTimes], BinTimes[maxpos-binpos < BinTimes] - FoldingPeriodDays) 
+		theano.tensor.set_subtensor(BinTimes[minpos-binpos > BinTimes], BinTimes[minpos-binpos > BinTimes] + FoldingPeriodDays) 
 
-		BinTimes=np.float64(BinTimes)
 
 		s = 1.0*np.exp(-0.5*(BinTimes)**2/g1width**2)
 
 
-		BinTimes = x-ModelBats[i]-gsep
-		BinTimes[BinTimes > maxpos-ModelBats[i]-gsep] = BinTimes[BinTimes > maxpos-ModelBats[i]-gsep] - FoldingPeriodDays
-		BinTimes[BinTimes < minpos-ModelBats[i]-gsep] = BinTimes[BinTimes < minpos-ModelBats[i]-gsep] + FoldingPeriodDays
+		BinTimes = x-binpos-gsep
+		theano.tensor.set_subtensor(BinTimes[maxpos-binpos-gsep < BinTimes], BinTimes[maxpos-binpos-gsep < BinTimes] - FoldingPeriodDays) 
+		theano.tensor.set_subtensor(BinTimes[minpos-binpos-gsep > BinTimes], BinTimes[minpos-binpos-gsep > BinTimes] + FoldingPeriodDays) 
 
-		BinTimes=np.float64(BinTimes)
 
 		s += g2amp*np.exp(-0.5*(BinTimes)**2/g2width**2)
 
 		'''Now subtract mean and scale so std is one.'''
 
-		smean = np.sum(s)/Nbins 
+		smean = theano.tensor.sum(s)/Nbins 
 		s = s-smean
 
 		sstd = np.dot(s,s)/Nbins
@@ -212,7 +220,8 @@ with basic_model:
 
 		# Expected value of outcome
 		signal = s*amplitude[i] + offset[i]
-
+		#plt.plot(np.linspace(0,1,1024), signal.eval())
+		#plt.show()
 
 		# Likelihood (sampling distribution) of observations
 		Y_obs += Normal('Y_obs', mu=signal, sd=noise[i], observed=ProfileData[i])
@@ -346,7 +355,7 @@ def ML(useToAs):
 
 		#print "ML", amp, baseline, noise
 
-	d = {'amplitude': amplitude, 'noise_log_': noise_log_, 'offset': offset}
+	d = {'amplitude': amplitude, 'noise_log_': noise_log_, 'offset': offset, 'phase': -6.30581674e-01}
 
 	return d
 
@@ -355,7 +364,7 @@ def hessian(useToAs):
 	pnoise=ProfileInfo[:useToAs,6]**2
 	onehess=1.0/np.float64(ProfileInfo[:useToAs,4]/pnoise)
 	noisehess = 1.0/(ProfileInfo[:useToAs,4]*(3.0/(ProfileInfo[:useToAs,6]*ProfileInfo[:useToAs,6]) - 1.0/(ProfileInfo[:useToAs,6]*ProfileInfo[:useToAs,6])))
-	d = {'amplitude': np.float64(onehess), 'noise_log_': np.float64(noisehess), 'offset': np.float64(onehess)}
+	d = {'amplitude': np.float64(onehess), 'noise_log_': np.float64(noisehess), 'offset': np.float64(onehess), 'phase': 1e-6}
 
 	return d
 
@@ -382,10 +391,24 @@ with basic_model:
 from pymc3 import traceplot
 
 traceplot(trace);
+plt.show()
 
 
 
-'''
+from pymc3 import Metropolis, sample
+
+with basic_model:
+
+	# Use starting ML point
+	start = MLpoint
+
+	hess = hessian(useToAs)
+
+	step1 = Metropolis(vars = [noise, offset, amplitude, TimingParams], scaling=0.1)
+
+	# draw 2000 posterior samples
+	trace = sample(20000, start=start, step=step1)
+
 from pymc3 import HamiltonianMC, sample
 
 with basic_model:
@@ -395,8 +418,14 @@ with basic_model:
 
 	hess = hessian(useToAs)
 
-	#Set scaling using hessian
-	step = HamiltonianMC(scaling=basic_model.dict_to_array(hess), is_cov=True)
+	step1 = HamiltonianMC(vars = [noise, offset, amplitude, TimingParams], scaling=basic_model.dict_to_array(hess), is_cov=True)
+
 	# draw 2000 posterior samples
-	trace = sample(2000, start=start)
-'''
+	trace = sample(2000, start=start, step=step1)
+
+
+from pymc3 import traceplot
+
+traceplot(trace);
+plt.show()
+
