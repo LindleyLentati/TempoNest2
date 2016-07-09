@@ -139,7 +139,7 @@ Savex[3] = 2.87192467e+01
 Savex[4] = 1.74380328e+00
 
 
-useToAs=10
+useToAs=50
 
 toas=psr.toas()
 residuals = psr.residuals(removemean=False)
@@ -165,7 +165,6 @@ from theano import function
 TRP = theano.shared(ReferencePeriod)
 TBinTimes = theano.shared(ShiftedBinTimes)
 
-
 basic_model = Model()
 
 with basic_model:
@@ -185,16 +184,7 @@ with basic_model:
 	g2width = Savex[3]*ReferencePeriod/1024
 	g2amp   = Savex[4]
 
-	'''
-	for i in range(useToAs):
-		x=ShiftedBinTimes[i]-0.002883
-	
-		s = MLp.get('offset')[i] + MLp.get('amplitude')[i]*(np.exp(-0.5*(x)**2/g1width**2) + g2amp*np.exp(-0.5*(x-gsep)**2/g2width**2))
-	
-		plt.plot(np.linspace(0,1,1024), s)
-		plt.plot(np.linspace(0,1,1024), ProfileData[i])
-		plt.show()
-	'''
+
 	Tg1width=theano.shared(g1width)
 	Tg2width =theano.shared(g2width)
 	Tg2amp=theano.shared(g2amp)
@@ -202,28 +192,15 @@ with basic_model:
 	
 
 	for i in range(useToAs):
+
 		x = TBinTimes[i]-phase
-
-		minpos = -TRP/2
-		if(theano.tensor.lt(minpos, TBinTimes[i][0])):
-			minpos=TBinTimes[i][0]
-
-		maxpos =  TRP/2
-		if(theano.tensor.lt(TBinTimes[i][-1], maxpos)):
-			maxpos = TBinTimes[i][-1]
-
-		theano.tensor.set_subtensor(x[maxpos < x], x[maxpos < x] - TRP) 
-		theano.tensor.set_subtensor(x[minpos > x], x[minpos > x] + TRP) 
-
+		x = ( x + ReferencePeriod/2) % (ReferencePeriod ) - ReferencePeriod/2
 
 		s =  offset[i] + amplitude[i]*(np.exp(-0.5*(x)**2/Tg1width**2)) 
 
 
 		x = TBinTimes[i]-phase-Tgsep
-
-		theano.tensor.set_subtensor(x[maxpos-Tgsep < x], x[maxpos-Tgsep < x] - TRP) 
-		theano.tensor.set_subtensor(x[minpos-Tgsep > x], x[minpos-Tgsep > x] + TRP) 
-
+		x = ( x + ReferencePeriod/2) % (ReferencePeriod ) - ReferencePeriod/2
 
 		s += amplitude[i]*Tg2amp*np.exp(-0.5*(x)**2/Tg2width**2)
 
@@ -349,7 +326,7 @@ def ML(useToAs):
 
 		#print "ML", amp, baseline, noise
 
-	d = {'amplitude': amplitude, 'noise_log_': noise_log_, 'offset': offset, 'phase': 0.002883}
+	d = {'amplitude': amplitude, 'noise_log_': noise_log_, 'offset': offset, 'phase': 0.00288206}
 
 	return d
 
@@ -358,7 +335,7 @@ def hessian(useToAs):
 	pnoise=ProfileInfo[:useToAs,6]**2
 	onehess=1.0/np.float64(ProfileInfo[:useToAs,4]/pnoise)
 	noisehess = 1.0/(ProfileInfo[:useToAs,4]*(3.0/(ProfileInfo[:useToAs,6]*ProfileInfo[:useToAs,6]) - 1.0/(ProfileInfo[:useToAs,6]*ProfileInfo[:useToAs,6])))
-	d = {'amplitude': np.float64(onehess), 'noise_log_': np.float64(noisehess), 'offset': np.float64(onehess), 'phase': np.ones(1)*1.8805952639063875e-13}
+	d = {'amplitude': np.float64(onehess), 'noise_log_': np.float64(noisehess), 'offset': np.float64(onehess), 'phase': np.ones(1)*8e-14}
 
 	return d
 
@@ -401,7 +378,7 @@ with basic_model:
 	step1 = Metropolis(vars = [amplitude, offset, noise, phase],  h=np.diag(basic_model.dict_to_array(hess)))
 
 	# draw 2000 posterior samples
-	trace = sample(20000, start=start, step=step1)
+	trace = sample(10000, start=start, step=step1)
 
 from pymc3 import traceplot
 
@@ -430,7 +407,7 @@ with basic_model:
 	step1 = HamiltonianMC(vars = [noise, offset, amplitude, phase], scaling=basic_model.dict_to_array(hess), is_cov=True)
 
 	# draw 2000 posterior samples
-	trace = sample(2000, start=start, step=step1)
+	trace = sample(2000, start=start, step=step1, njobs = 2)
 
 
 from pymc3 import traceplot
