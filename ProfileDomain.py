@@ -21,6 +21,56 @@ def GetProfNoise(profamps):
 	mediannoise=np.median(threesiglist)
 	return mediannoise
 
+
+def PreComputeShapelets(interpTime = 1, MeanBeta = 0.1):
+
+
+	print("Calculating Shapelet Interpolation Matrix : ", interpTime, MeanBeta);
+
+	'''
+	/////////////////////////////////////////////////////////////////////////////////////////////  
+	/////////////////////////Profile Params//////////////////////////////////////////////////////
+	/////////////////////////////////////////////////////////////////////////////////////////////
+	'''
+
+	numtointerpolate = np.int(ReferencePeriod/1024/interpTime/10.0**-9)+1
+	InterpolatedTime = ReferencePeriod/1024/numtointerpolate
+
+	InterpShapeMatrix = []
+	MeanBeta = MeanBeta/1024*ReferencePeriod
+
+	InterpBins = 1024
+	interpStep = ReferencePeriod/InterpBins/numtointerpolate
+	
+	
+
+	for t in range(numtointerpolate):
+
+
+		binpos = t*interpStep
+
+		samplerate = ReferencePeriod/InterpBins
+		x = np.linspace(binpos, binpos+samplerate*(InterpBins-1), InterpBins)
+		x = ( x + ReferencePeriod/2) % (ReferencePeriod ) - ReferencePeriod/2
+		x=x/MeanBeta
+
+		hermiteMatrix = np.zeros([InterpBins, MaxCoeff])
+		for i in range(MaxCoeff):
+			amps = np.zeros(MaxCoeff)
+			amps[i] = 1
+			s = numpy.polynomial.hermite.hermval(x, amps)*np.exp(-0.5*(x)**2)
+			hermiteMatrix[:,i] = s
+		InterpShapeMatrix.append(np.copy(hermiteMatrix))
+
+	
+	InterpShapeMatrix = np.array(InterpShapeMatrix)
+	print("Finished Computing Interpolated Profiles")
+	return InterpShapeMatrix, InterpolatedTime
+
+
+
+
+
 SECDAY = 24*60*60
 
 #First load pulsar.  We need the sats (separate day/second), and the file names of the archives (FNames)
@@ -117,6 +167,22 @@ len(ProfileData)
 ProfileInfo=np.array(ProfileInfo)
 ProfileData=np.array(ProfileData)
 
+toas=psr.toas()
+residuals = psr.residuals(removemean=False)
+BatCorrs = psr.batCorrs()
+ModelBats = psr.satSec() + BatCorrs - residuals/SECDAY
+
+ProfileStartBats = ProfileInfo[:,2]/SECDAY + ProfileInfo[:,3]*0 + ProfileInfo[:,3]*0.5 + BatCorrs
+ProfileEndBats =  ProfileInfo[:,2]/SECDAY + ProfileInfo[:,3]*(ProfileInfo[:,4]-1) + ProfileInfo[:,3]*0.5 + BatCorrs
+
+Nbins = ProfileInfo[:,4]
+ProfileBinTimes = []
+for i in range(NToAs):
+	ProfileBinTimes.append((np.linspace(ProfileStartBats[i], ProfileEndBats[i], Nbins[i])-ModelBats[i])*SECDAY)
+ShiftedBinTimes = np.float64(np.array(ProfileBinTimes))
+
+ReferencePeriod = np.float64(ProfileInfo[0][5])
+
 
 
 def my_prior(x):
@@ -129,152 +195,120 @@ def my_prior(x):
 
     return logp
 
+MaxCoeff = 10
 
+InterpBasis, InterpolatedTime = PreComputeShapelets(interpTime = 1, MeanBeta = 47.9)
+
+
+#@profile
 def MarginLogLike(x):
     
-    ReferencePeriod = ProfileInfo[0][5]
-    FoldingPeriodDays = ReferencePeriod/SECDAY
-    phase=x[0]*ReferencePeriod/SECDAY
-    TimingParameters=np.float128(x[1:numTime+1])
 
-    pcount = numTime+1
+	pcount = 0
+	phase=3.36203222e-03 #x[pcount]
+	pcount += 1
 
-    gsep=x[pcount+0]*ReferencePeriod/SECDAY/1024
-    g1width=np.float64(x[pcount+1]*ReferencePeriod/SECDAY/1024)
-    g2width=np.float64(x[pcount+2]*ReferencePeriod/SECDAY/1024)
-    g2amp=x[pcount+3]
-
-    for i in range(numTime):
-        psr[psr.pars()[i]].val = TempoPriors[i][0] + TempoPriors[i][1]*TimingParameters[i]
-    
-    
-    toas=psr.toas()
-    residuals = psr.residuals(removemean=False)
-    BatCorrs = psr.batCorrs()
-    ModelBats = psr.satSec() + BatCorrs - phase - residuals/SECDAY
-
-    
-    loglike = 0
-    for i in range(NToAs):
-    
-        '''Start by working out position in phase of the model arrival time'''
-
-        ProfileStartBat = ProfileInfo[i,2]/SECDAY + ProfileInfo[i,3]*0 + ProfileInfo[i,3]*0.5 + BatCorrs[i]
-        ProfileEndBat = ProfileInfo[i,2]/SECDAY + ProfileInfo[i,3]*(ProfileInfo[i,4]-1) + ProfileInfo[i,3]*0.5 + BatCorrs[i]
-        
-        #print ProfileStartBat, ModelBats[0], ProfileEndBat
-        
-        #print "PDiff:", (ModelBats[0]-ProfileStartBat), (ModelBats[0]-ProfileStartBat)*24*60*60,  (ModelBats[0]-ProfileStartBat)*24*60*60*psr['F0'].val
-        
-        #print "MBAT:", psr.stoas[i], ModelBats[i], psr.satSec()[i], psr.batCorrs()[i], phase, residuals[i]
-	#print "BINPOS:", ModelBats[i], ProfileStartBat, ProfileEndBat
-
-	binpos = ModelBats[i]
-
-	if(binpos < ProfileStartBat):
-		binpos += FoldingPeriodDays
-
-	if(binpos > ProfileEndBat):
-		binpos -= FoldingPeriodDays
-
-        Nbins = ProfileInfo[i,4]
-        x=np.linspace(ProfileStartBat, ProfileEndBat, Nbins)
-        
-        minpos = binpos - FoldingPeriodDays/2
-        if(minpos < ProfileStartBat):
-                minpos=ProfileStartBat
-                
-        maxpos = binpos + FoldingPeriodDays/2
-        if(maxpos > ProfileEndBat):
-                maxpos = ProfileEndBat
-                
-                
-        '''Need to wrap phase for each of the Gaussian components separately'''
-                
-        BinTimes = x-binpos
-	BinTimes[BinTimes > maxpos-binpos] = BinTimes[BinTimes > maxpos-binpos] - FoldingPeriodDays
-	BinTimes[BinTimes < minpos-binpos] = BinTimes[BinTimes < minpos-binpos] + FoldingPeriodDays
-
-	BinTimes=np.float64(BinTimes)/g1width
+	NCoeff = MaxCoeff-1
+	pcount += 1
 
 
-        s = 1.0*np.exp(-0.5*(BinTimes)**2)
-        
-        
-        BinTimes = x-binpos-gsep
-	BinTimes[BinTimes > maxpos-binpos-gsep] = BinTimes[BinTimes > maxpos-binpos-gsep] - FoldingPeriodDays
-        BinTimes[BinTimes < minpos-binpos-gsep] = BinTimes[BinTimes < minpos-binpos-gsep] + FoldingPeriodDays
+	ShapeAmps=np.zeros(MaxCoeff)
+	ShapeAmps[0] = 1
+	ShapeAmps[1:] = x[pcount:pcount+(MaxCoeff-1)]
+	pcount += MaxCoeff-1
 
-	BinTimes=np.float64(BinTimes)/g2width
-                 
-        s += g2amp*np.exp(-0.5*(BinTimes)**2)
+	TimingParameters=np.float128(x[1:numTime+1])
+	pcount += numTime
 
-	#plt.plot(np.linspace(0,1,1024), ProfileData[i])
-	#plt.plot(np.linspace(0,1,1024), s*(np.max(ProfileData[i])-np.min(ProfileData[i]))+np.min(ProfileData[i]))
-	#plt.show()
-        
-        '''Now subtract mean and scale so std is one.  Makes the matrix stuff stable.'''
-      
-        smean = np.sum(s)/Nbins 
-        s = s-smean
+	loglike = 0
+
+	for i in range(NToAs):
+
 	
-	sstd = np.dot(s,s)/Nbins
-        s=s/np.sqrt(sstd)
-        
-        '''Make design matrix.  Two components: baseline and profile shape.'''
 
-        M=np.ones([2,Nbins])
-        M[1] = s
-        
+		'''Start by working out position in phase of the model arrival time'''
 
-	pnoise = ProfileInfo[i][6]
- 
-        MNM = np.dot(M, M.T)      
-        MNM /= (pnoise*pnoise)
-        
-        '''Invert design matrix. 2x2 so just do it numerically'''
-      
-        
-        detMNM = MNM[0][0]*MNM[1][1] - MNM[1][0]*MNM[0][1]
-        InvMNM = np.zeros([2,2])
-        InvMNM[0][0] = MNM[1][1]/detMNM
-        InvMNM[1][1] = MNM[0][0]/detMNM
-        InvMNM[0][1] = -1*MNM[0][1]/detMNM
-        InvMNM[1][0] = -1*MNM[1][0]/detMNM
-        
-        logdetMNM = np.log(detMNM)
-            
-        '''Now get dNM and solve for likelihood.'''
-            
-            
-        dNM = np.dot(ProfileData[i], M.T)/(pnoise*pnoise)
-        
-        
-        dNMMNM = np.dot(dNM.T, InvMNM)
-        MarginLike = np.dot(dNMMNM, dNM)
-        
-        profilelike = -0.5*(logdetMNM - MarginLike)
-        loglike += profilelike
-        
-        if(doplot == True):
-            baseline=dNMMNM[0]
-            amp = dNMMNM[1]
-	    noise = np.std(ProfileData[i] - baseline - amp*s)
-	    print i, amp, baseline, noise
-            plt.plot(x, ProfileData[i])
-            plt.plot(x,baseline+s*amp)
-            plt.show()
-            
-    return loglike
+
+		x = ShiftedBinTimes[i]-phase
+		x[0] = ( x[0] + ReferencePeriod/2) % (ReferencePeriod ) - ReferencePeriod/2
+
+		InterpBin = np.int(x[0]%(ReferencePeriod/1024)/InterpolatedTime)
+		WBT = x[0]-InterpolatedTime*InterpBin
+		RollBins=np.int(np.round(WBT/(ReferencePeriod/1024)))
+
+
+		'''Evaulate Shapelet model: to be replaced with interpolated matrix'''
+
+		s = np.roll(np.dot(InterpBasis[InterpBin], ShapeAmps), -RollBins)
+
+		'''Now subtract mean and scale so std is one.  Makes the matrix stuff stable.'''
+
+		smean = np.sum(s)/Nbins[i] 
+		s = s-smean
+
+		sstd = np.dot(s,s)/Nbins[i]
+		s=s/np.sqrt(sstd)
+
+		'''Make design matrix.  Two components: baseline and profile shape.'''
+
+		M=np.ones([2,Nbins[i]])
+		M[1] = s
+
+
+		pnoise = ProfileInfo[i][6]
+
+		MNM = np.dot(M, M.T)      
+		MNM /= (pnoise*pnoise)
+
+		'''Invert design matrix. 2x2 so just do it numerically'''
+
+
+		detMNM = MNM[0][0]*MNM[1][1] - MNM[1][0]*MNM[0][1]
+		InvMNM = np.zeros([2,2])
+		InvMNM[0][0] = MNM[1][1]/detMNM
+		InvMNM[1][1] = MNM[0][0]/detMNM
+		InvMNM[0][1] = -1*MNM[0][1]/detMNM
+		InvMNM[1][0] = -1*MNM[1][0]/detMNM
+
+		logdetMNM = np.log(detMNM)
+		    
+		'''Now get dNM and solve for likelihood.'''
+		    
+		    
+		dNM = np.dot(ProfileData[i], M.T)/(pnoise*pnoise)
+
+
+		dNMMNM = np.dot(dNM.T, InvMNM)
+		MarginLike = np.dot(dNMMNM, dNM)
+
+		profilelike = -0.5*(logdetMNM - MarginLike)
+		loglike += profilelike
+
+		if(doplot == True):
+		    baseline=dNMMNM[0]
+		    amp = dNMMNM[1]
+		    noise = np.std(ProfileData[i] - baseline - amp*s)
+		    print i, amp, baseline, noise
+		    plt.plot(np.linspace(0,1,Nbins[i]), ProfileData[i])
+		    plt.plot(np.linspace(0,1,Nbins[i]),baseline+s*amp)
+		    plt.show()
+		    plt.plot(np.linspace(0,1,Nbins[i]),ProfileData[i]-(baseline+s*amp))
+		    plt.show()
+
+	return loglike
+
+
+
 
 parameters = []
 parameters.append('Phase')
+parameters.append('NCoeff')
+for i in range(MaxCoeff-1):
+	parameters.append('S'+str(i))
 for i in range(numTime):
 	parameters.append(psr.pars()[i])
-parameters.append('GSep')
-parameters.append('G1Width')
-parameters.append('G2Width')
-parameters.append('G2Amp')
+
+
 
 print parameters
 n_params = len(parameters)
@@ -285,29 +319,58 @@ pmin = np.array(np.ones(n_params))*-1024
 pmax = np.array(np.ones(n_params))*1024
 
 
+pmin[1] = 1
+pmax[1] = MaxCoeff  #Ncoeff
+pmin[2:2+MaxCoeff-1] = -1
+pmax[2:2+MaxCoeff-1] = 1
+
+
 
 x0 = np.array(np.zeros(n_params))
 
-x0[0] = -6.30581674e-01
+pcount = 0
+x0[pcount] = 0.002883
+pcount += 1
+
+x0[pcount] = 9
+pcount += 1
+
+
+for i in range(MaxCoeff-1):
+	x0[pcount+i] = 0
+
+#x0[pcount:pcount+len(ShapeMax)] = ShapeMax
+pcount += MaxCoeff-1
+
 for i in range(numTime):
 	x0[1+i] = 0
+pcount += numTime
 
-pcount=numTime+1
-x0[pcount+0] = 9.64886554e+01
-x0[pcount+1] = 3.12774568e+01
-x0[pcount+2] = 2.87192467e+01
-x0[pcount+3] = 1.74380328e+00
+
+
 
 cov_diag = np.array(np.ones(n_params))
-cov_diag[0] = 0.000115669002113
+
+pcount = 0
+cov_diag[pcount] = 0.0000115669002113
+pcount += 1
+cov_diag[pcount] = 1
+pcount += 1
+for i in range(MaxCoeff-1):
+        cov_diag[pcount+i] = 0.0001
+pcount += MaxCoeff-1
 for i in range(numTime):
         cov_diag[1+i] = 1
-pcount=numTime+1
-cov_diag[pcount+0] = 0.107382829786
-cov_diag[pcount+1] = 0.148923616311
-cov_diag[pcount+2] = 0.0672450249764
-cov_diag[pcount+3] = 0.00524526749377
+pcount += numTime
 
+
+
+
+x0=np.loadtxt('ML.dat')
+x0=x0[:11]
+
+cov_diag=np.loadtxt('Cov.dat')
+cov_diag = cov_diag[:11]
 
 doplot=False
 burnin=1000
@@ -317,10 +380,26 @@ sampler = ptmcmc.PTSampler(ndim=n_params,logl=MarginLogLike,logp=my_prior,
                             resume=True)
 sampler.sample(p0=x0,Niter=10000,isave=10,burn=burnin,thin=1,neff=1000)
 
-
+'''
 chains=np.loadtxt('./chains/chain_1.txt').T
-ML=chains.T[np.argmax(chains[5])][:n_params]
+ML=chains.T[np.argmax(chains[-3][burnin:])][:n_params]
+ML[0]=3.36203222e-03
+x0=ML
 doplot=True
+MarginLogLike(x0)
+doplot=False
+
+np.savetxt("ML.dat", ML)
+STD=np.zeros(n_params)
 for i in range(n_params):
+	STD[i]  =  np.std(chains[i][burnin:])
 	print "param:", i, np.mean(chains[i][burnin:]), np.std(chains[i][burnin:])
-MarginLogLike(ML)
+np.savetxt("Cov.dat", STD)
+cov_diag = STD
+x0=ML
+'''
+
+
+
+
+
