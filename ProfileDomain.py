@@ -6,6 +6,22 @@ import matplotlib.pyplot as plt
 import PTMCMCSampler
 from PTMCMCSampler import PTMCMCSampler as ptmcmc
 
+def TimeJump(x, iteration, beta):
+
+
+	q=x.copy()
+	y=np.dot(FisherU.T,x[:numTime])
+	ind = np.unique(np.random.randint(0,numTime,np.random.randint(0,numTime,1)[0]))
+	ran=np.random.standard_normal(numTime)
+	y[ind]=y[ind]+ran[ind]#/np.sqrt(FisherS[ind])
+
+	newpars=np.dot(FisherU, y)
+	q[:numTime]=newpars
+
+	
+	return q, 0
+	
+
 #Funtion to determine an estimate of the white noise in the profile data
 def GetProfNoise(profamps):
 
@@ -172,6 +188,16 @@ residuals = psr.residuals(removemean=False)
 BatCorrs = psr.batCorrs()
 ModelBats = psr.satSec() + BatCorrs - residuals/SECDAY
 
+designMatrix=psr.designmatrix(incoffset=False)
+for i in range(numTime):
+	designMatrix[:,i] *= TempoPriors[i][1]
+	zval = designMatrix[0,i]
+	designMatrix[:,i] -= zval
+
+designMatrix=np.float64(designMatrix)
+
+
+
 ProfileStartBats = ProfileInfo[:,2]/SECDAY + ProfileInfo[:,3]*0 + ProfileInfo[:,3]*0.5 + BatCorrs
 ProfileEndBats =  ProfileInfo[:,2]/SECDAY + ProfileInfo[:,3]*(ProfileInfo[:,4]-1) + ProfileInfo[:,3]*0.5 + BatCorrs
 
@@ -217,10 +243,12 @@ def MarginLogLike(x):
 	ShapeAmps[1:] = x[pcount:pcount+(MaxCoeff-1)]
 	pcount += MaxCoeff-1
 
-	TimingParameters=np.float128(x[1:numTime+1])
+	TimingParameters=x[pcount:pcount+numTime]
 	pcount += numTime
 
 	loglike = 0
+
+	TimeSignal = np.dot(designMatrix, TimingParameters)
 
 	for i in range(NToAs):
 
@@ -229,7 +257,7 @@ def MarginLogLike(x):
 		'''Start by working out position in phase of the model arrival time'''
 
 
-		x = ShiftedBinTimes[i]-phase
+		x = ShiftedBinTimes[i]-phase-TimeSignal[i]
 		x[0] = ( x[0] + ReferencePeriod/2) % (ReferencePeriod ) - ReferencePeriod/2
 
 		InterpBin = np.int(x[0]%(ReferencePeriod/1024)/InterpolatedTime)
@@ -239,7 +267,7 @@ def MarginLogLike(x):
 
 		'''Evaulate Shapelet model: to be replaced with interpolated matrix'''
 
-		s = np.roll(np.dot(InterpBasis[InterpBin], ShapeAmps), -RollBins)
+		s = np.roll(np.dot(InterpBasis[InterpBin][:,:NCoeff+1], ShapeAmps[:NCoeff+1]), -RollBins)
 
 		'''Now subtract mean and scale so std is one.  Makes the matrix stuff stable.'''
 
@@ -366,11 +394,11 @@ pcount += numTime
 
 
 
-x0=np.loadtxt('ML.dat')
-x0=x0[:11]
+xload=np.loadtxt('ML.dat')
+x0[:11]=xload[:11]
 
-cov_diag=np.loadtxt('Cov.dat')
-cov_diag = cov_diag[:11]
+covload = np.loadtxt('Cov.dat')
+cov_diag[:11] = covload[:11]
 
 doplot=False
 burnin=1000
