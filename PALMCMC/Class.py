@@ -579,6 +579,7 @@ class Likelihood(object):
 
 
 	#@profile
+
 	def MarginLogLike(self, x):
 	    
 
@@ -602,37 +603,32 @@ class Likelihood(object):
 
 		TimeSignal = np.dot(self.designMatrix, TimingParameters)
 
+		xS = self.ShiftedBinTimes[:,0]-phase-TimeSignal
+		xS = ( xS + self.ReferencePeriod/2) % (self.ReferencePeriod ) - self.ReferencePeriod/2
+
+		InterpBins = (xS%(self.ReferencePeriod/self.Nbins[:])/self.InterpolatedTime).astype(int)
+		WBTs = xS-self.InterpolatedTime*InterpBins
+		RollBins=(np.round(WBTs/(self.ReferencePeriod/self.Nbins[:]))).astype(np.int)
+
+
+		#Multiply and shift out the shapelet model
+
+		s=[np.roll(np.dot(self.InterpBasis[InterpBins[i]][:,:NCoeff+1], ShapeAmps[:NCoeff+1]), -RollBins[i]) for i in range(len(RollBins))]
+
+		#Subtract mean and rescale
+
+
+		s = [s[i] - np.sum(s[i])/self.Nbins[i] for i in range(self.NToAs)]	
+		s = [s[i]/(np.dot(s[i],s[i])/self.Nbins[i]) for i in range(self.NToAs)]
+
+
 		for i in range(self.NToAs):
 
-
-
-			'''Start by working out position in phase of the model arrival time'''
-
-
-			x = self.ShiftedBinTimes[i]-phase-TimeSignal[i]
-			x[0] = ( x[0] + self.ReferencePeriod/2) % (self.ReferencePeriod ) - self.ReferencePeriod/2
-
-			InterpBin = np.int(x[0]%(self.ReferencePeriod/self.Nbins[i])/self.InterpolatedTime)
-			WBT = x[0]-self.InterpolatedTime*InterpBin
-			RollBins=np.int(np.round(WBT/(self.ReferencePeriod/self.Nbins[i])))
-
-
-			'''Evaulate Shapelet model: to be replaced with interpolated matrix'''
-
-			s = np.roll(np.dot(self.InterpBasis[InterpBin][:,:NCoeff+1], ShapeAmps[:NCoeff+1]), -RollBins)
-
-			'''Now subtract mean and scale so std is one.  Makes the matrix stuff stable.'''
-
-			smean = np.sum(s)/self.Nbins[i] 
-			s = s-smean
-
-			sstd = np.dot(s,s)/self.Nbins[i]
-			s=s/np.sqrt(sstd)
 
 			'''Make design matrix.  Two components: baseline and profile shape.'''
 
 			M=np.ones([2,self.Nbins[i]])
-			M[1] = s
+			M[1] = s[i]
 
 
 			pnoise = self.ProfileInfo[i][6]
@@ -670,13 +666,12 @@ class Likelihood(object):
 			    noise = np.std(self.ProfileData[i] - baseline - amp*s)
 			    print i, amp, baseline, noise
 			    plt.plot(np.linspace(0,1,self.Nbins[i]), self.ProfileData[i])
-			    plt.plot(np.linspace(0,1,self.Nbins[i]),baseline+s*amp)
+			    plt.plot(np.linspace(0,1,self.Nbins[i]),baseline+s[i]*amp)
 			    plt.show()
-			    plt.plot(np.linspace(0,1,self.Nbins[i]),self.ProfileData[i]-(baseline+s*amp))
+			    plt.plot(np.linspace(0,1,self.Nbins[i]),self.ProfileData[i]-(baseline+s[i]*amp))
 			    plt.show()
 
 		return loglike
-
 
 
 	#Jump proposal for the timing model parameters
@@ -696,6 +691,27 @@ class Likelihood(object):
 		return q, 0
 
 
+'''
 
+	def drawFromShapeletPrior(parameters, iter, beta):
+	    
+		# post-jump parameters
+		q = parameters.copy()
 
+		# transition probability
+		qxy = 0
+
+		# choose one coefficient at random to prior-draw on
+		ind = np.unique(np.random.randint(1, MaxCoeff, 1))
+
+		# where in your parameter list do the coefficients start?
+		ct = 2
+
+		for ii in ind:
+		    
+		    q[ct+ii] = np.random.uniform(pmin[ct+ii], pmax[ct+ii])
+		    qxy += 0
+	    
+		return q, qxy
+'''
 

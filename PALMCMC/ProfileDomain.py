@@ -97,11 +97,10 @@ pcount += lfunc.numTime
 
 
 
-
 lfunc.doplot=False
 burnin=1000
 sampler = ptmcmc.PTSampler(ndim=n_params,logl=lfunc.MarginLogLike,logp=lfunc.my_prior,
-                            cov=np.diag(cov_diag**2), outDir='./chains/',resume=False)
+                            cov=np.diag(cov_diag**2), outDir='./chains4/',resume=False)
 #sampler.addProposalToCycle(lfunc.TimeJump, 20)
 sampler.sample(p0=x0,Niter=10000,isave=10,burn=burnin,thin=1,neff=1000)
 
