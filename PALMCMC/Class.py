@@ -54,6 +54,7 @@ class Likelihood(object):
 		self.MLShapeCoeff = None
 		self.MeanBeta = None
 		self.MeanPhase = None
+		self.PhasePrior = None
 
 		self.doplot = None
 	
@@ -63,6 +64,8 @@ class Likelihood(object):
 		self.startPoint = None
 		self.cov_diag = None
 		self.hess = None
+		self.eigM = None
+		self.eigV = None
 
 		self.InterpolatedTime = None
 		self.InterpBasis = None
@@ -933,8 +936,11 @@ class Likelihood(object):
 	def MarginLogLike(self, x):
 	    
 
+
 		pcount = 0
 		phase=x[0]*self.ReferencePeriod#self.MeanPhase*self.ReferencePeriod
+		phasePrior = -0.5*(phase-self.MeanPhase)*(phase-self.MeanPhase)/self.PhasePrior/self.PhasePrior
+	
 		pcount += 1
 
 		NCoeff = self.MaxCoeff-1
@@ -1033,7 +1039,7 @@ class Likelihood(object):
 			    plt.plot(np.linspace(0,1,self.Nbins[i]),self.ProfileData[i]-(baseline+s[i]*amp))
 			    plt.show()
 
-		return loglike
+		return loglike+phasePrior
 
 	def calculateHessian(self,x):
 
@@ -1130,7 +1136,7 @@ class Likelihood(object):
 			PhaseScale = MLAmp/MLSigma
 
 			pcount = 0
-			HessMatrix[pcount,:] = PhaseScale*j[i]
+			HessMatrix[pcount,:] = PhaseScale*j[i]*self.ReferencePeriod
 			pcount += 1
 
 
@@ -1144,7 +1150,7 @@ class Likelihood(object):
 
 			#Hessian for Timing Model
 
-			for c in range(1, self.numTime):
+			for c in range(self.numTime):
 				HessMatrix[pcount,:] = j[i]*PhaseScale*self.designMatrix[i,c]
 				pcount += 1
 
@@ -1249,7 +1255,7 @@ class Likelihood(object):
 			PhaseScale = MLAmp/MLSigma
 
 			pcount = 0
-			HessMatrix[pcount,:] = PhaseScale*j[i]
+			HessMatrix[pcount,:] = PhaseScale*j[i]*self.ReferencePeriod
 			pcount += 1
 
 			fvals = ((self.psr.freqs[i] - self.EvoRefFreq)/1000.0)**np.arange(0,self.EvoNPoly+1)

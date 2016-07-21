@@ -21,7 +21,7 @@ lfunc.loadPulsar("OneChan.par", "OneChan.tim")
 lfunc.TScrunch(doplot = False, channels = 1)
 
 
-lfunc.getInitialParams(MaxCoeff = 100, x0=[0.0, -2.0, 2.0], cov_diag=[0.1, 0.1, 1.0], resume=False)
+lfunc.getInitialParams(MaxCoeff = 100, x0=[0.0, -2.0, 2.0], cov_diag=[0.1, 0.1, 1.0], resume=True)
 
 
 
@@ -76,34 +76,28 @@ pcount += lfunc.numTime
 
 lfunc.calculateHessian(x0)
 covM=np.linalg.inv(lfunc.hess)
+lfunc.PhasePrior = np.sqrt(covM[0,0])*lfunc.ReferencePeriod
+lfunc.MeanPhase = lfunc.MeanPhase*lfunc.ReferencePeriod
 
 
-cov_diag[pcount:pcount+(lfunc.MaxCoeff-1)*(lfunc.EvoNPoly+1)] = lfunc.hess.flatten()
-
-pcount += (lfunc.MaxCoeff-1)*(lfunc.EvoNPoly+1)
-
-for i in range(lfunc.numTime):
-        cov_diag[pcount+i] = 1
-pcount += lfunc.numTime
-
-
+'''
 lfunc.calculateShapePhaseCov(x0)
 ShapePhaseCov = np.linalg.inv(lfunc.ShapePhaseCov)
 
 import scipy as sp
 SPChol = sp.linalg.cholesky(ShapePhaseCov)
 plist = [0,1,3,5,7,9,11]
+'''
 
-
-groups=[[0,1,2,3,4,5,6,7,8,9,10,11,12], [0,1,3,5,7,9,11]]
+#groups=[[0,1,2,3,4,5,6,7,8,9,10,11], [0,1,2,3,4,5,6,7]]
 lfunc.doplot=False
 burnin=1000
 sampler = ptmcmc.PTSampler(ndim=n_params,logl=lfunc.MarginLogLike,logp=lfunc.my_prior,
-                            cov=covM, outDir='./chains/',resume=False, groups=groups)
-sampler.addProposalToCycle(lfunc.TimeJump, 20)
-sampler.sample(p0=x0,Niter=100000,isave=10,burn=burnin,thin=1,neff=1000)
+                            cov=covM, outDir='./chains/',resume=False)
+#sampler.addProposalToCycle(lfunc.TimeJump, 20)
+sampler.sample(p0=x0,Niter=30000,isave=10,burn=burnin,thin=1,neff=1000)
 
-chains=np.loadtxt('./chains5/chain_1.txt').T
+chains=np.loadtxt('./chains/chain_1.txt').T
 ML=chains.T[np.argmax(chains[-3][burnin:])][:n_params]
 ML[0]=3.36203222e-03
 x0=ML
