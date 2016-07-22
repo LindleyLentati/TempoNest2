@@ -118,7 +118,7 @@ class Likelihood(object):
 		self.psr.fit()
 		self.SatSecs = self.psr.satSec()
 		self.SatDays = self.psr.satDay()
-		self.FNames = self.psr.fnames()
+		self.FNames = self.psr.filename()
 		self.NToAs = self.psr.nobs
 		    
 
