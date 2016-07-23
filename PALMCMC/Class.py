@@ -29,9 +29,12 @@ class Likelihood(object):
 		self.numTime = None	   
 		self.TempoPriors = None
 
-		self.ProfileData= None
-		self.ProfileMJDs= None
-		self.ProfileInfo= None
+		self.ProfileData = None
+		self.ProfileFData = None
+		self.fftFreqs = None
+		self.NFBasis = None
+		self.ProfileMJDs = None
+		self.ProfileInfo = None
 
 		self.toas= None
 		self.residuals =  None
@@ -70,6 +73,9 @@ class Likelihood(object):
 		self.InterpolatedTime = None
 		self.InterpBasis = None
 		self.InterpJitterMatrix = None
+		self.InterpFBasis = None
+		self.InterpFJitterMatrix = None
+
 
 		self.getShapeletStepSize = False
 		self.TScrunchChans = None
@@ -230,7 +236,7 @@ class Likelihood(object):
 		self.ProfileStartBats = self.ProfileInfo[:,2]/self.SECDAY + self.ProfileInfo[:,3]*0 + self.ProfileInfo[:,3]*0.5 + self.BatCorrs
 		self.ProfileEndBats =  self.ProfileInfo[:,2]/self.SECDAY + self.ProfileInfo[:,3]*(self.ProfileInfo[:,4]-1) + self.ProfileInfo[:,3]*0.5 + self.BatCorrs
 
-		self.Nbins = self.ProfileInfo[:,4]
+		self.Nbins = (self.ProfileInfo[:,4]).astype(int)
 		ProfileBinTimes = []
 		for i in range(self.NToAs):
 			ProfileBinTimes.append((np.linspace(self.ProfileStartBats[i], self.ProfileEndBats[i], self.Nbins[i])- self.ModelBats[i])*self.SECDAY)
@@ -698,8 +704,12 @@ class Likelihood(object):
 
 			    plt.plot(np.linspace(0,1,ScrunchBins), self.TScrunched[i])
 			    plt.plot(np.linspace(0,1,ScrunchBins),s)
+			    plt.xlabel('Phase')
+			    plt.ylabel('Profile Amplitude')
 			    plt.show()
 			    plt.plot(np.linspace(0,1,ScrunchBins),self.TScrunched[i]-s)
+			    plt.xlabel('Phase')
+			    plt.ylabel('Profile Residuals')
 			    plt.show()
 			    zml=ML[1]
 			    MLCoeff.append(ML[1:]/zml)
@@ -715,7 +725,6 @@ class Likelihood(object):
 		return loglike
 
 
-	#Function returns matrix containing interpolated shapelet basis vectors given a time 'interpTime' in ns, and a Beta value to use.
 	def PreComputeShapelets(self, interpTime = 1, MeanBeta = 0.1):
 
 
@@ -732,8 +741,14 @@ class Likelihood(object):
 		numtointerpolate = np.int(self.ReferencePeriod/InterpBins/interpTime/10.0**-9)+1
 		InterpolatedTime = self.ReferencePeriod/InterpBins/numtointerpolate
 
-		InterpShapeMatrix = np.zeros([numtointerpolate, InterpBins,self.MaxCoeff,])
-		InterpJitterMatrix = np.zeros([numtointerpolate,InterpBins, self.MaxCoeff])
+
+
+		self.InterpBasis = np.zeros([numtointerpolate, InterpBins,self.MaxCoeff])
+		self.InterpJitterMatrix = np.zeros([numtointerpolate,InterpBins, self.MaxCoeff])
+
+		lenRFFT = len(np.fft.rfft(np.ones(InterpBins)))
+		InterpFShapeMatrix = np.zeros([numtointerpolate, lenRFFT, self.MaxCoeff])+0j
+		InterpFJitterMatrix = np.zeros([numtointerpolate,lenRFFT, self.MaxCoeff])+0j
 
 		MeanBeta = MeanBeta*self.ReferencePeriod
 
@@ -743,6 +758,7 @@ class Likelihood(object):
 
 
 		for t in range(numtointerpolate):
+
 			self.update_progress(np.float64(t)/numtointerpolate)
 
 			binpos = t*interpStep
@@ -772,18 +788,36 @@ class Likelihood(object):
 			for i in range(1,self.MaxCoeff):
 				JitterMatrix[:,i] = (1.0/np.sqrt(2.0))*(np.sqrt(1.0*i)*hermiteMatrix[:,i-1] - np.sqrt(1.0*(i+1))*hermiteMatrix[:,i+1])/MeanBeta
 
-			InterpShapeMatrix[t]  = np.copy(hermiteMatrix[:,:self.MaxCoeff])
-			InterpJitterMatrix[t] = np.copy(JitterMatrix)
 
+
+			self.InterpBasis[t]  = np.copy(hermiteMatrix[:,:self.MaxCoeff])
+			self.InterpJitterMatrix[t] = np.copy(JitterMatrix)
+
+			InterpFShapeMatrix[t]  = np.copy(np.fft.rfft(hermiteMatrix[:,:self.MaxCoeff], axis=0))
+			InterpFJitterMatrix[t] = np.copy(np.fft.rfft(JitterMatrix, axis=0))
+
+
+		threshold = 10.0**-10
+		upperindex=1
+		while(np.max(np.abs(InterpFShapeMatrix[0,upperindex:,:])) > threshold):
+			upperindex += 5
+			print "upper index is:", upperindex,np.max(np.abs(InterpFShapeMatrix[0,upperindex:,:]))
 		#InterpShapeMatrix = np.array(InterpShapeMatrix)
 		#InterpJitterMatrix = np.array(InterpJitterMatrix)
 		print("\nFinished Computing Interpolated Profiles")
-		self.InterpBasis = InterpShapeMatrix
-		self.InterpJitterMatrix = InterpJitterMatrix
+
+
+		self.InterpFBasis = InterpFShapeMatrix[:,1:upperindex,:]
+		self.InterpFJitterMatrix = InterpFJitterMatrix[:,1:upperindex,:]
 		self.InterpolatedTime  = InterpolatedTime
 
+		Fdata =  np.fft.rfft(self.ProfileData, axis=1)[:,1:upperindex]
 
-
+		self.NFBasis = upperindex - 1
+		self.ProfileFData = np.zeros([self.NToAs, 2*self.NFBasis])
+		self.ProfileFData[:, :self.NFBasis] = np.real(Fdata)
+		self.ProfileFData[:, self.NFBasis:] = np.imag(Fdata)
+		
 
 	def getInitialPhase(self, doplot = True):
 	
@@ -817,6 +851,8 @@ class Likelihood(object):
 
 		if(doplot == True):
 			plt.scatter(phases, likes)
+			plt.xlabel('Phase')
+			plt.ylabel('Log-Likelihood')
 			plt.show()
 
 		self.MeanPhase = mphase
@@ -854,16 +890,17 @@ class Likelihood(object):
 		RollBins=(np.round(WBTs/(self.ReferencePeriod/self.Nbins[:]))).astype(np.int)
 
 
-		#Multiply and shift out the shapelet model
+		SmallS=[np.dot(self.InterpFBasis[InterpBins[i]], np.sum(((self.psr.freqs[i] - self.EvoRefFreq)/1000.0)**np.arange(0,self.EvoNPoly+1)*self.MLShapeCoeff, axis=1)) for i in range(len(RollBins))]
 
-		s=[np.roll(np.dot(self.InterpBasis[InterpBins[i]][:,:self.MaxCoeff+1], np.sum(((self.psr.freqs[i] - self.EvoRefFreq)/1000.0)**np.arange(0,self.EvoNPoly+1)*self.MLShapeCoeff, axis=1)), -RollBins[i]) for i in range(len(RollBins))]
+		s=np.zeros([self.NToAs, self.NFBasis+1])+0j
+		s[:,1:] = SmallS
 
-		#Subtract mean and rescale
+		s=np.fft.irfft(s, n=self.Nbins[0], axis=1)
+		s=[np.roll(s[i], -RollBins[i]) for i in range(len(RollBins))]
 
 
-		s = [s[i] - np.sum(s[i])/self.Nbins[i] for i in range(self.NToAs)]	
+		#Rescale
 		s = [s[i]/(np.dot(s[i],s[i])/self.Nbins[i]) for i in range(self.NToAs)]
-
 
 		for i in range(self.NToAs):
 
@@ -973,21 +1010,28 @@ class Likelihood(object):
 		RollBins=(np.round(WBTs/(self.ReferencePeriod/self.Nbins[:]))).astype(np.int)
 
 
-		#Multiply and shift out the shapelet model
 
-		#ShapeCoeff = np.sum(((self.psr.freqs[i] - self.EvoRefFreq)/1000.0)**np.arange(0,self.EvoNPoly+1)*self.MLShapeCoeff, axis=1)
+
 
 		s=[np.roll(np.dot(self.InterpBasis[InterpBins[i]][:,:NCoeff+1], np.sum(((self.psr.freqs[i] - self.EvoRefFreq)/1000.0)**np.arange(0,self.EvoNPoly+1)*ShapeAmps, axis=1)), -RollBins[i]) for i in range(len(RollBins))]
-
-		#j=[np.roll(np.dot(self.InterpJitterMatrix[InterpBins[i]][:,:NCoeff+1], np.sum(((self.psr.freqs[i] - self.EvoRefFreq)/1000.0)**np.arange(0,self.EvoNPoly+1)*ShapeAmps, axis=1)), -RollBins[i]) for i in range(len(RollBins))]
-	
-
-
-		#Subtract mean and rescale
-
-
 		s = [s[i] - np.sum(s[i])/self.Nbins[i] for i in range(self.NToAs)]	
 		s = [s[i]/(np.dot(s[i],s[i])/self.Nbins[i]) for i in range(self.NToAs)]
+
+
+
+
+		s=[np.dot(self.InterpFBasis[InterpBins[i]], np.sum(((self.psr.freqs[i] - self.EvoRefFreq)/1000.0)**np.arange(0,self.EvoNPoly+1)*self.MLShapeCoeff, axis=1)) for i in range(len(RollBins))]
+		for i in range(len(RollBins)):
+			s[i][0]=0
+		s=np.fft.irfft(s, n=self.Nbins[0], axis=1)
+		s=[np.roll(s[i], -RollBins[i]) for i in range(len(RollBins))]
+
+
+		#Rescale
+		s = [s[i]/(np.dot(s[i],s[i])/self.Nbins[i]) for i in range(self.NToAs)]
+
+
+
 
 
 		for i in range(self.NToAs):
@@ -1027,6 +1071,95 @@ class Likelihood(object):
 
 			profilelike = -0.5*(logdetMNM - MarginLike)
 			loglike += profilelike
+
+			if(self.doplot == True):
+			    baseline=dNMMNM[0]
+			    amp = dNMMNM[1]
+			    noise = np.std(self.ProfileData[i] - baseline - amp*s)
+			    print i, amp, baseline, noise
+			    plt.plot(np.linspace(0,1,self.Nbins[i]), self.ProfileData[i])
+			    plt.plot(np.linspace(0,1,self.Nbins[i]),baseline+s[i]*amp)
+			    plt.show()
+			    plt.plot(np.linspace(0,1,self.Nbins[i]),self.ProfileData[i]-(baseline+s[i]*amp))
+			    plt.show()
+
+		return loglike+phasePrior
+
+	#@profile	
+	def FFTMarginLogLike(self, x):
+	    
+
+
+		pcount = 0
+		phase=x[0]*self.ReferencePeriod
+		phasePrior = -0.5*(phase-self.MeanPhase)*(phase-self.MeanPhase)/self.PhasePrior/self.PhasePrior
+
+		pcount += 1
+
+		NCoeff = self.MaxCoeff-1
+		#pcount += 1
+
+
+		ShapeAmps=np.zeros([self.MaxCoeff, self.EvoNPoly+1])
+		ShapeAmps[0][0] = 1
+		ShapeAmps[1:]=x[pcount:pcount+(self.MaxCoeff-1)*(self.EvoNPoly+1)].reshape([(self.MaxCoeff-1),(self.EvoNPoly+1)])
+
+
+		pcount += (self.MaxCoeff-1)*(self.EvoNPoly+1)
+
+		TimingParameters=x[pcount:pcount+self.numTime]
+		pcount += self.numTime
+
+		loglike = 0
+
+		TimeSignal = np.dot(self.designMatrix, TimingParameters)
+
+		xS = self.ShiftedBinTimes[:,0]-phase
+
+		if(self.numTime>0):
+			xS -= TimeSignal
+
+		xS = ( xS + self.ReferencePeriod/2) % (self.ReferencePeriod ) - self.ReferencePeriod/2
+
+		InterpBins = (xS%(self.ReferencePeriod/self.Nbins[:])/self.InterpolatedTime).astype(int)
+		WBTs = xS-self.InterpolatedTime*InterpBins
+		RollBins=(np.round(WBTs/(self.ReferencePeriod/self.Nbins[:]))).astype(np.int)
+
+
+		#s = [np.dot(self.InterpFBasis[InterpBins[i]], np.sum(((self.psr.freqs[i] - self.EvoRefFreq)/1000.0)**np.arange(0,self.EvoNPoly+1)*ShapeAmps, axis=1)) for i in range(len(RollBins))]
+		s = np.sum([np.dot(self.InterpFBasis[InterpBins], ShapeAmps[:,i])*(((self.psr.freqs - self.EvoRefFreq)/1000.0)**i).reshape(self.NToAs,1) for i in range(self.EvoNPoly+1)], axis=0)
+
+
+
+		for i in range(self.NToAs):
+
+			rfftfreqs=np.linspace(1,self.NFBasis,self.NFBasis)/self.Nbins[i]
+
+			pnoise = self.ProfileInfo[i,6]*np.sqrt(self.Nbins[i])/np.sqrt(2)
+
+			rollVec = np.exp(2*np.pi*RollBins[i]*rfftfreqs*1j)
+			rollS1 = s[i]*rollVec
+
+			FS = np.zeros(2*self.NFBasis)
+			FS[:self.NFBasis] = np.real(rollS1)
+			FS[self.NFBasis:] = np.imag(rollS1)
+
+			FS /= np.sqrt(np.dot(FS,FS)/(2*self.NFBasis))
+
+			MNM = np.dot(FS, FS)/(pnoise*pnoise)
+			detMNM = MNM
+			logdetMNM = np.log(detMNM)
+
+			InvMNM = 1.0/MNM
+
+			dNM = np.dot(self.ProfileFData[i], FS)/(pnoise*pnoise)
+			dNMMNM = dNM*InvMNM
+
+			MarginLike = dNMMNM*dNM
+
+			profilelike = -0.5*(logdetMNM - MarginLike)
+			loglike += profilelike     
+
 
 			if(self.doplot == True):
 			    baseline=dNMMNM[0]
@@ -1289,7 +1422,7 @@ class Likelihood(object):
 
 
 
-'''
+	'''
 	def drawFromShapeletPrior(parameters, iter, beta):
 	    
 		# post-jump parameters
@@ -1310,7 +1443,16 @@ class Likelihood(object):
 		    qxy += 0
 	    
 		return q, qxy
-'''
+	'''
 
+	def ConvolveExp(self, x, tau):
+
+		tsig = np.exp(-x/tau)
+		fsig = np.fft.rfft(tsig)
+
+		f = np.abs(np.fft.fftfreq(len(x))[:len(x)/2+1])
+		fanalytic = 1j*tau/(1j + tau*f)
+
+		return tsig, fsig, fanalytic
 
 

@@ -92,12 +92,12 @@ plist = [0,1,3,5,7,9,11]
 #groups=[[0,1,2,3,4,5,6,7,8,9,10,11], [0,1,2,3,4,5,6,7]]
 lfunc.doplot=False
 burnin=1000
-sampler = ptmcmc.PTSampler(ndim=n_params,logl=lfunc.MarginLogLike,logp=lfunc.my_prior,
-                            cov=covM, outDir='./chains/',resume=False)
-#sampler.addProposalToCycle(lfunc.TimeJump, 20)
+sampler = ptmcmc.PTSampler(ndim=n_params,logl=lfunc.FFTMarginLogLike,logp=lfunc.my_prior,
+                            cov=covM, outDir='./FFTChains4/',resume=False)
+sampler.addProposalToCycle(lfunc.TimeJump, 20)
 sampler.sample(p0=x0,Niter=30000,isave=10,burn=burnin,thin=1,neff=1000)
-
-chains=np.loadtxt('./chains/chain_1.txt').T
+'''
+chains=np.loadtxt('./FFTChains2/chain_1.txt').T
 ML=chains.T[np.argmax(chains[-3][burnin:])][:n_params]
 ML[0]=3.36203222e-03
 x0=ML
@@ -107,7 +107,7 @@ doplot=False
 
 np.savetxt("ML.dat", ML)
 
-chains=np.loadtxt('./chains6/chain_1.txt').T
+chains=np.loadtxt('./FFTChains2/chain_1.txt').T
 ML=chains.T[burnin:][np.argmax(chains[-3][burnin:])][:n_params]
 STD=np.zeros(n_params)
 for i in range(n_params):
@@ -117,4 +117,4 @@ np.savetxt("Cov.dat", STD)
 cov_diag = STD
 x0=ML
 
-
+'''
