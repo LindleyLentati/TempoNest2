@@ -1,0 +1,40 @@
+def PrintEpochParams(time):
+
+time=0.0001
+stoas = lfunc.psr.stoas
+mintime = stoas.min()
+maxtime = stoas.max()
+
+NEpochs = (maxtime-mintime)/time
+Epochs=np.linspace(mintime, maxtime+time, int(NEpochs))
+EpochList = []
+for i in range(len(Epochs)-1):
+	select_indices = np.where(np.logical_and( stoas < Epochs[i+1], stoas >= Epochs[i]))[0]
+	if(len(select_indices) > 0):
+		EpochList.append(i)
+
+EpochList = np.unique(np.array(EpochList))
+for i in range(len(EpochList)):
+	if(i < 9):
+		print "SX_000"+str(i+1)+" -2.90883832 0"
+		print "SXR1_000"+str(i+1)+" "+str(Epochs[EpochList[i]])
+		print "SXR2_000"+str(i+1)+" "+str(Epochs[EpochList[i]+1])
+		print "SXER_000"+str(i+1)+" 0.20435656\n"
+
+	if(i < 99 and i >= 9):
+		print "SX_00"+str(i+1)+" -2.90883832 0"
+		print "SXR1_00"+str(i+1)+" "+str(Epochs[EpochList[i]])
+		print "SXR2_00"+str(i+1)+" "+str(Epochs[EpochList[i]+1])
+		print "SXER_00"+str(i+1)+" 0.20435656\n"
+
+	if(i < 999 and i >= 99):
+		print "SX_0"+str(i+1)+" -2.90883832 0"
+		print "SXR1_0"+str(i+1)+" "+str(Epochs[EpochList[i]])
+		print "SXR2_0"+str(i+1)+" "+str(Epochs[EpochList[i]+1])
+		print "SXER_0"+str(i+1)+" 0.20435656\n"
+
+	if(i < 9999 and i >= 999):
+		print "SX_"+str(i+1)+" -2.90883832 0"
+		print "SXR1_"+str(i+1)+" "+str(Epochs[EpochList[i]])
+		print "SXR2_"+str(i+1)+" "+str(Epochs[EpochList[i]+1])
+		print "SXER_"+str(i+1)+" 0.20435656\n"

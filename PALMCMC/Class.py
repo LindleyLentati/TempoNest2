@@ -46,6 +46,7 @@ class Likelihood(object):
 
 		self.TScrunched = None
 		self.TScrunchedNoise = None
+		self.TScrunchedFreqs = None
 
 		self.Nbins = None
 		self.ShiftedBinTimes = None
@@ -57,10 +58,12 @@ class Likelihood(object):
 		self.MLShapeCoeff = None
 		self.MeanBeta = None
 		self.MeanPhase = None
+		self.MeanScatter = None
 		self.PhasePrior = None
 
 		self.doplot = None
 	
+		self.n_params = None
 		self.parameters = None
 		self.pmin = None
 		self.pmax = None
@@ -73,6 +76,7 @@ class Likelihood(object):
 		self.InterpolatedTime = None
 		self.InterpBasis = None
 		self.InterpJitterMatrix = None
+
 		self.InterpFBasis = None
 		self.InterpFJitterMatrix = None
 
@@ -86,12 +90,14 @@ class Likelihood(object):
 
 		self.chains = None
 		self.ShapePhaseCov = None
-
+		self.returnVal  = 0;
 
 		#Model Parameters
 
 		self.fitNCoeff = False
 		self.fitNComps = False
+		self.NScatterEpochs = 0
+		self.ScatterInfo = None
 
 	import time, sys
 
@@ -162,6 +168,10 @@ class Likelihood(object):
 
 
 		    for i in range(nsub):
+
+			if(profcount == self.NToAs):
+			        break
+
 			subint=arch.get_Integration(i)
 		
 			nbins = subint.get_nbin()
@@ -171,7 +181,7 @@ class Likelihood(object):
 			inttime = subint.get_duration()
 			centerfreq = subint.get_centre_frequency()
 		
-			#print "Subint Info:", i, nbins, nchans, npols, foldingperiod, inttime, centerfreq
+			print "Subint Info:", profcount, i, nbins, nchans, npols, foldingperiod, inttime, centerfreq
 		
 			firstbin = subint.get_epoch()
 			intday = firstbin.intday()
@@ -200,7 +210,7 @@ class Likelihood(object):
 				    self.ProfileData.append(np.copy(profamps))
 
 				    self.ProfileInfo.append([self.SatSecs[profcount], self.SatDays[profcount], np.float128(intsec)+np.float128(fracsecs), pulsesamplerate, nbins, foldingperiod, noiselevel])                    
-				    #print "ChanInfo:", j, chanfreq, toafreq, np.sum(profamps)
+				    print "ChanInfo:", j, chanfreq, toafreq, np.sum(profamps), profcount
 				    profcount += 1
 				    if(profcount == self.NToAs):
 				        break
@@ -287,7 +297,22 @@ class Likelihood(object):
 		for i in range(channels):
 			chanindices.append(zipped[(np.abs(weightsum-np.float64(i+1)/channels)).argmin()][0])
 
+		chanindices[0] -= 1
+		chanindices[-1] += 1
+
 		chanindices=np.array(chanindices)
+
+
+		averageFreqs=[]
+		for i in range(len(chanindices)-1):
+
+			sub = zipped[np.logical_and(zipped[:,0] < chanindices[i+1], zipped[:,0] >= chanindices[i])]
+			averageFreqs.append(np.sum(sub[:,0]*sub[:,1])/np.sum(sub[:,1]))
+
+		averageFreqs=np.array(averageFreqs)
+		self.TScrunchedFreqs = averageFreqs
+
+
 		TScrunched = np.zeros([channels,np.max(self.Nbins)])
 
 	
@@ -313,6 +338,10 @@ class Likelihood(object):
 
 
 		    for i in range(nsub):
+
+			if(profcount == self.NToAs):
+			        break
+
 			subint=arch.get_Integration(i)
 
 			nbins = subint.get_nbin()
@@ -415,12 +444,7 @@ class Likelihood(object):
 		chanindices=np.array(chanindices)
 		refloc=np.abs(chanindices-RFreq).argmin()
 
-		averageFreqs=[]
-		for i in range(len(chanindices)-1):
-			sub = zipped[np.logical_and(zipped[:,0] < chanindices[i+1], zipped[:,0] >= chanindices[i])]
-			averageFreqs.append(np.sum(sub[:,0]*sub[:,1])/np.sum(sub[:,1]))
-
-		averageFreqs=np.array(averageFreqs)
+		averageFreqs = self.TScrunchedFreqs
 		refloc=np.abs(averageFreqs-RFreq).argmin()
 
 
@@ -456,7 +480,7 @@ class Likelihood(object):
 
 
 
-	def getInitialParams(self, MaxCoeff = 1, fitNComps = 1, RFreq = 1400, polyorder = 0, parameters = None, pmin = None, pmax = None, x0 = None, cov_diag = None, burnin = 1000, outDir = './Initchains/', sampler = 'pal', resume=False):
+	def getInitialParams(self, MaxCoeff = 1, fitNComps = 1, RFreq = 1400, polyorder = 0, parameters = None, pmin = None, pmax = None, x0 = None, cov_diag = None, burnin = 1000, outDir = './Initchains/', sampler = 'pal', resume=False, incScattering = False, mn_live = 500, doplot=False):
 	
 
 		
@@ -464,6 +488,10 @@ class Likelihood(object):
 		self.MaxCoeff = MaxCoeff
 		self.fitNComps = fitNComps
 
+
+		self.NScatterEpochs=0
+		if(incScattering == True):
+			self.NScatterEpochs=1
 
 		if(parameters == None):
 			parameters=[]
@@ -473,6 +501,9 @@ class Likelihood(object):
 				parameters.append('Log10_Width_'+str(i))
 			for i in range(self.fitNComps):
 				parameters.append('NCoeff_'+str(i))
+
+			if(incScattering == True):
+				parameters.append('STau')
 
 		print "\nGetting initial fit to profile using averaged data, fitting for: ", parameters
 		n_params = len(parameters)
@@ -485,7 +516,10 @@ class Likelihood(object):
 			for i in range(self.fitNComps):
 				pmin.append(-3.5)
 			for i in range(self.fitNComps):
-				pmin.append(2)
+				pmin.append(np.log10(1.0))
+			if(incScattering == True):
+				pmin.append(-6.0)
+
 
 		if(pmax == None):
 			pmax=[]
@@ -494,7 +528,10 @@ class Likelihood(object):
 			for i in range(self.fitNComps):
 				pmax.append(0)
 			for i in range(self.fitNComps):
-				pmax.append(MaxCoeff)
+				pmax.append(np.log10(MaxCoeff))
+			if(incScattering == True):
+				pmax.append(1.0)
+
 
 		if(x0 == None):
 			x0=[]
@@ -503,7 +540,10 @@ class Likelihood(object):
 			for i in range(self.fitNComps):
 				x0.append(-2)
 			for i in range(self.fitNComps):
-				x0.append(50)
+				x0.append(np.log10(50.0))
+			if(incScattering == True):
+				x0.append(-2.0)
+
 
 		if(cov_diag == None):
 			cov_diag=[]
@@ -512,8 +552,9 @@ class Likelihood(object):
 			for i in range(self.fitNComps):
 				cov_diag.append(0.1)
 			for i in range(self.fitNComps):
-				cov_diag.append(5)
-
+				cov_diag.append(0.1)
+			if(incScattering == True):
+				cov_diag.append(0.1)
 
 		self.pmin = np.array(pmin)
 		self.pmax = np.array(pmax)
@@ -522,7 +563,7 @@ class Likelihood(object):
 
 
 		self.doplot = 0
-
+		self.returnVal = 0
 
 		ML=[]
 
@@ -534,7 +575,7 @@ class Likelihood(object):
 
 			sampler.sample(p0=x0,Niter=10000,isave=10,burn=burnin,thin=1,neff=1000)
 
-			chains=np.loadtxt('./Initchains/chain_1.txt').T
+			chains=np.loadtxt(outDir+'/chain_1.txt').T
 
 			self.chains = chains
 
@@ -543,23 +584,28 @@ class Likelihood(object):
 
 		elif(sampler == 'multinest'):
 
-			pymultinest.run(self.MNInitialLogLikeWrap, self.MNprior, n_params, importance_nested_sampling = False, resume = resume, verbose = True, sampling_efficiency = 'model', multimodal=False, n_live_points = 200, outputfiles_basename='./MNchains/Initial-')
+			pymultinest.run(self.MNInitialLogLikeWrap, self.MNprior, n_params, importance_nested_sampling = False, resume = resume, verbose = True, sampling_efficiency = 'model', multimodal=False, n_live_points = mn_live, outputfiles_basename=outDir)
 
-			chains=np.loadtxt('./MNchains/Initial-phys_live.points').T
+			chains=np.loadtxt(outDir+'phys_live.points').T
 			ML=chains.T[np.argmax(chains[-2])][:n_params]
 
 
-		self.doplot=1
+		self.doplot=doplot
+		self.returnVal = 1
 
-		self.MaxCoeff = np.floor(ML[2]).astype(np.int)
+		self.MaxCoeff = np.floor(10.0**ML[2]).astype(np.int)
 		self.MeanBeta = 10.0**ML[1]
+		
+		if(incScattering == True):
+			self.MeanScatter = ML[3]
+
 		self.MLShapeCoeff, self.TScrunchShapeErr = self.InitialLogLike(ML)
 		
 
 
 		self.TScrunchShapeErr = np.array(self.TScrunchShapeErr).T
 
-		if(self.TScrunchChans > 1):
+		if(self.TScrunchChans > 1 and polyorder > 0):
 			self.FitEvoCoeffs(RFreq, polyorder)
 
 		if(polyorder == 0):
@@ -633,8 +679,12 @@ class Likelihood(object):
 		width = 10.0**x[pcount:pcount+NComps]
 		pcount += NComps
 
-		FitNCoeff = np.floor(x[pcount:pcount+NComps]).astype(np.int)
+		FitNCoeff = np.floor(10.0**x[pcount:pcount+NComps]).astype(np.int)
 		pcount += NComps
+
+		if(self.NScatterEpochs == 1):
+			STau = 10.0**x[pcount]
+			pcount += 1
 
 
 		loglike = 0
@@ -658,8 +708,9 @@ class Likelihood(object):
 
 			ExVec = np.exp(-0.5*(xVec)**2)
 			ScaleFactors = self.Bconst(width[comp], np.arange(FitNCoeff[comp]))
-
-			self.TNothpl(FitNCoeff[comp], xVec, FullMatrix[ccount:ccount+FitNCoeff[comp]])
+	
+			if(FitNCoeff[comp] > 1):
+				self.TNothpl(FitNCoeff[comp], xVec, FullMatrix[ccount:ccount+FitNCoeff[comp]])
 
 			FullMatrix[ccount:ccount+FitNCoeff[comp]] *= ExVec
 			for i in range(FitNCoeff[comp]):
@@ -671,55 +722,125 @@ class Likelihood(object):
 
 			ccount+=FitNCoeff[comp]
 
-		MTM = np.dot(FullMatrix, FullMatrix.T)
-
-		Prior = 1000.0
-		diag=MTM.diagonal().copy()
-		diag += 1.0/Prior**2
-		np.fill_diagonal(MTM, diag)
-		try:
-			Chol_MTM = sp.linalg.cho_factor(MTM.copy())
-		except:
-			return -np.inf
-
-		if(self.doplot == 1):
-			ShapeErrs = np.sqrt(np.linalg.inv(MTM.copy()).diagonal())[1:]
-
-		loglike = 0
-		MLCoeff=[]
-		MLErrs = []
-		for i in range(self.TScrunchChans):
-
-			Md = np.dot(FullMatrix, self.TScrunched[i])			
-			ML = sp.linalg.cho_solve(Chol_MTM, Md)
-
-			s = np.dot(FullMatrix.T, ML)
-
-			r = self.TScrunched - s	
 
 
-			loglike  += -0.5*np.sum(r**2)/self.TScrunchedNoise[i]**2 
+		if(self.NScatterEpochs == 0):
+
+			MTM = np.dot(FullMatrix, FullMatrix.T)
+
+			Prior = 1000.0
+			diag=MTM.diagonal().copy()
+			diag += 1.0/Prior**2
+			np.fill_diagonal(MTM, diag)
+			try:
+				Chol_MTM = sp.linalg.cho_factor(MTM.copy())
+			except:
+				return -np.inf
+
+			if(self.returnVal == 1):
+				ShapeErrs = np.sqrt(np.linalg.inv(MTM.copy()).diagonal())[1:]
+
+			loglike = 0
+			MLCoeff=[]
+			MLErrs = []
+			for i in range(self.TScrunchChans):
+
+				Md = np.dot(FullMatrix, self.TScrunched[i])			
+				ML = sp.linalg.cho_solve(Chol_MTM, Md)
+
+				s = np.dot(FullMatrix.T, ML)
+
+				r = self.TScrunched[i] - s	
+
+
+				loglike  += -0.5*np.sum(r**2)/self.TScrunchedNoise[i]**2  - 0.5*np.log(self.TScrunchedNoise[i]**2)*ScrunchBins
+				if(self.doplot == 1):
+
+				    plt.plot(np.linspace(0,1,ScrunchBins), self.TScrunched[i])
+				    plt.plot(np.linspace(0,1,ScrunchBins),s)
+				    plt.xlabel('Phase')
+				    plt.ylabel('Profile Amplitude')
+				    plt.show()
+				    plt.plot(np.linspace(0,1,ScrunchBins),self.TScrunched[i]-s)
+				    plt.xlabel('Phase')
+				    plt.ylabel('Profile Residuals')
+				    plt.show()
+
+				if(self.returnVal == 1):
+				    zml=ML[1]
+				    MLCoeff.append(ML[1:]/zml)
+				    MLErrs.append(ShapeErrs*self.TScrunchedNoise[i]/zml)
+
+			if(self.returnVal == 1):
+			    return MLCoeff, MLErrs
+
+		if(self.NScatterEpochs == 1):
+
+			loglike = 0
+			MLCoeff=[]
+			MLErrs = []
+
+			FullMatrix = np.fft.rfft(FullMatrix, axis=1)
+			for i in range(self.TScrunchChans):
+	
+				ScatterScale = (self.TScrunchedFreqs[i]*10.0**6)**4/10.0**(9.0*4.0)
+				STime = STau/ScatterScale
+				ScatterVec = self.ConvolveExp(np.linspace(0, ScrunchBins/2, ScrunchBins/2+1)/self.ReferencePeriod, STime)
+
+				FFTMatrix = FullMatrix*ScatterVec
+				ScatterMatrix = np.fft.irfft(FFTMatrix, axis=1)
+
+				MTM = np.dot(ScatterMatrix, ScatterMatrix.T)
+
+				Prior = 1000.0
+				diag=MTM.diagonal().copy()
+				diag += 1.0/Prior**2
+				np.fill_diagonal(MTM, diag)
+				try:
+					Chol_MTM = sp.linalg.cho_factor(MTM.copy())
+				except:
+					return -np.inf
+
+				if(self.doplot == 1):
+					ShapeErrs = np.sqrt(np.linalg.inv(MTM.copy()).diagonal())[1:]
+
+				Md = np.dot(ScatterMatrix, self.TScrunched[i])			
+				ML = sp.linalg.cho_solve(Chol_MTM, Md)
+
+				s = np.dot(ScatterMatrix.T, ML)
+
+				r = self.TScrunched[i] - s	
+
+				#for bin in range(1024):
+				#	print i, bin, self.TScrunched[i][bin], s[bin], self.TScrunchedNoise[i]
+
+
+				chanlike  = -0.5*np.sum(r**2)/self.TScrunchedNoise[i]**2 - 0.5*np.log(self.TScrunchedNoise[i]**2)*ScrunchBins
+
+				loglike += chanlike
+
+				#print i, chanlike, self.TScrunchedNoise[i]
+				if(self.doplot == 1):
+
+				    plt.plot(np.linspace(0,1,ScrunchBins), self.TScrunched[i])
+				    plt.plot(np.linspace(0,1,ScrunchBins),s)
+				    plt.xlabel('Phase')
+				    plt.ylabel('Profile Amplitude')
+				    plt.show()
+				    plt.plot(np.linspace(0,1,ScrunchBins),self.TScrunched[i]-s)
+				    plt.xlabel('Phase')
+				    plt.ylabel('Profile Residuals')
+				    plt.show()
+				    zml=ML[1]
+				    MLCoeff.append(ML[1:]/zml)
+				    #print ShapeErrs, ML
+				    MLErrs.append(ShapeErrs*self.TScrunchedNoise[i]/zml)
+
 
 			if(self.doplot == 1):
+				return MLCoeff, MLErrs
 
-			    plt.plot(np.linspace(0,1,ScrunchBins), self.TScrunched[i])
-			    plt.plot(np.linspace(0,1,ScrunchBins),s)
-			    plt.xlabel('Phase')
-			    plt.ylabel('Profile Amplitude')
-			    plt.show()
-			    plt.plot(np.linspace(0,1,ScrunchBins),self.TScrunched[i]-s)
-			    plt.xlabel('Phase')
-			    plt.ylabel('Profile Residuals')
-			    plt.show()
-			    zml=ML[1]
-			    MLCoeff.append(ML[1:]/zml)
-			    #print ShapeErrs, ML
-			    MLErrs.append(ShapeErrs*self.TScrunchedNoise[i]/zml)
-
-		if(self.doplot == 1):
-		    return MLCoeff, MLErrs
-
-		loglike -= np.sum(FitNCoeff)
+		loglike -= self.TScrunchChans*np.sum(FitNCoeff)
 
 
 		return loglike
@@ -801,6 +922,9 @@ class Likelihood(object):
 		upperindex=1
 		while(np.max(np.abs(InterpFShapeMatrix[0,upperindex:,:])) > threshold):
 			upperindex += 5
+			if(upperindex >= lenRFFT):
+				upperindex = lenRFFT-1
+				break
 			print "upper index is:", upperindex,np.max(np.abs(InterpFShapeMatrix[0,upperindex:,:]))
 		#InterpShapeMatrix = np.array(InterpShapeMatrix)
 		#InterpJitterMatrix = np.array(InterpJitterMatrix)
@@ -890,7 +1014,14 @@ class Likelihood(object):
 		RollBins=(np.round(WBTs/(self.ReferencePeriod/self.Nbins[:]))).astype(np.int)
 
 
-		SmallS=[np.dot(self.InterpFBasis[InterpBins[i]], np.sum(((self.psr.freqs[i] - self.EvoRefFreq)/1000.0)**np.arange(0,self.EvoNPoly+1)*self.MLShapeCoeff, axis=1)) for i in range(len(RollBins))]
+		SmallS=[np.dot(self.InterpFBasis[InterpBins[i]], np.sum(((self.psr.freqs[i] - self.EvoRefFreq)/1000.0)**np.arange(0,self.EvoNPoly+1)*self.MLShapeCoeff[:self.MaxCoeff], axis=1)) for i in range(len(RollBins))]
+
+		if(self.NScatterEpochs > 0):
+			for i in range(self.NToAs):
+				ScatterScale = (self.psr.freqs[i]*10.0**6)**4/10.0**(9.0*4.0)
+				STime = 10.0**self.MeanScatter/ScatterScale
+				ScatterVec = self.ConvolveExp(np.linspace(1, self.NFBasis, self.NFBasis)/self.ReferencePeriod, STime)
+				SmallS[i] *= ScatterVec
 
 		s=np.zeros([self.NToAs, self.NFBasis+1])+0j
 		s[:,1:] = SmallS
@@ -1110,6 +1241,10 @@ class Likelihood(object):
 		TimingParameters=x[pcount:pcount+self.numTime]
 		pcount += self.numTime
 
+		ScatteringParameters = 10.0**x[pcount:pcount+self.NScatterEpochs]
+		pcount += self.NScatterEpochs
+
+
 		loglike = 0
 
 		TimeSignal = np.dot(self.designMatrix, TimingParameters)
@@ -1130,7 +1265,6 @@ class Likelihood(object):
 		s = np.sum([np.dot(self.InterpFBasis[InterpBins], ShapeAmps[:,i])*(((self.psr.freqs - self.EvoRefFreq)/1000.0)**i).reshape(self.NToAs,1) for i in range(self.EvoNPoly+1)], axis=0)
 
 
-
 		for i in range(self.NToAs):
 
 			rfftfreqs=np.linspace(1,self.NFBasis,self.NFBasis)/self.Nbins[i]
@@ -1139,6 +1273,13 @@ class Likelihood(object):
 
 			rollVec = np.exp(2*np.pi*RollBins[i]*rfftfreqs*1j)
 			rollS1 = s[i]*rollVec
+
+			if(self.NScatterEpochs > 0):
+				ScatterScale = self.psr.ssbfreqs()[i]**4/10.0**(9.0*4.0)
+				STime = np.sum(ScatteringParameters[self.ScatterInfo[i]])/ScatterScale
+				ScatterVec = self.ConvolveExp(rfftfreqs*self.Nbins[i]/self.ReferencePeriod, STime)
+
+				rollS1 *= ScatterVec
 
 			FS = np.zeros(2*self.NFBasis)
 			FS[:self.NFBasis] = np.real(rollS1)
@@ -1217,10 +1358,15 @@ class Likelihood(object):
 		j=[np.roll(np.dot(self.InterpJitterMatrix[InterpBins[i]][:,:NCoeff+1], np.sum(((self.psr.freqs[i] - self.EvoRefFreq)/1000.0)**np.arange(0,self.EvoNPoly+1)*ShapeAmps, axis=1)), -RollBins[i]) for i in range(len(RollBins))]
 
 
+		FFTS = np.sum([np.dot(self.InterpFBasis[InterpBins], ShapeAmps[:,i])*(((self.psr.freqs - self.EvoRefFreq)/1000.0)**i).reshape(self.NToAs,1) for i in range(self.EvoNPoly+1)], axis=0)
+		FFTS = [np.exp(2*np.pi*RollBins[i]*(np.linspace(1,self.NFBasis,self.NFBasis)/self.Nbins[i])*1j)*FFTS[i] for i in range(self.NToAs)]
 
-		HessSize = 1 + self.numTime +(self.MaxCoeff-1)*(self.EvoNPoly+1)
+
+		HessSize = self.n_params
 		Hessian = np.zeros([HessSize,HessSize])
+		LinearSize = 1 + (self.MaxCoeff-1)*(self.EvoNPoly+1) + self.numTime
 
+		MLAmps = np.zeros(self.NToAs)
 		for i in range(self.NToAs):
 
 
@@ -1262,7 +1408,10 @@ class Likelihood(object):
 			MLAmp = dNMMNM[1]
 			MLSigma = pnoise
 
-			HessMatrix = np.zeros([HessSize, self.Nbins[i]])
+
+			MLAmps[i] = MLAmp
+
+			HessMatrix = np.zeros([LinearSize, self.Nbins[i]])
 
 
 			#Phase First
@@ -1289,9 +1438,293 @@ class Likelihood(object):
 
 
 			OneHess = np.dot(HessMatrix, HessMatrix.T)
-			Hessian += OneHess
+			Hessian[:LinearSize, :LinearSize] += OneHess
+		
+
+
+			for c in range(self.NScatterEpochs):
+				if(c in self.ScatterInfo[i]):
+
+					tau = 10.0**x[-self.NScatterEpochs+c]
+					f = np.linspace(1,self.NFBasis,self.NFBasis)/self.ReferencePeriod
+					w = 2.0*np.pi*f
+					ScatterScale = 1.0/(self.psr.ssbfreqs()[i]**4/10.0**(9.0*4.0))
+
+					Conv = self.ConvolveExp(f, tau*ScatterScale)
+
+					ConvVec = np.zeros(2*self.NFBasis)
+					ConvVec[:self.NFBasis] = np.real(Conv)
+					ConvVec[self.NFBasis:] = np.imag(Conv)
+
+
+					PVec = np.zeros(2*self.NFBasis)
+					PVec[:self.NFBasis] = MLAmps[i]*np.real(FFTS[i])
+					PVec[self.NFBasis:] = MLAmps[i]*np.imag(FFTS[i])
+
+					pnoise = self.ProfileInfo[i,6]*np.sqrt(self.Nbins[i])/np.sqrt(2)
+
+					HessDenom = 1.0/(1.0 + tau**2*w**2*ScatterScale**2)**3
+					GradDenom = 1.0/(1.0 + tau**2*w**2*ScatterScale**2)**2
+
+
+					rHess2 = -(4*tau**2*ScatterScale**2*w**2*(tau**2*ScatterScale**2*w**2 - 1)*np.log(10.0)**2)*HessDenom*PVec[:self.NFBasis]
+					rGrad2 = 2*tau**2*ScatterScale**2*w**2*np.log(10.0)*GradDenom*PVec[:self.NFBasis]
+					rFunc2 = (self.ProfileFData[i][:self.NFBasis] - PVec[:self.NFBasis]*np.real(Conv))
+
+					FullRealHess = -1*(rHess2*rFunc2 + rGrad2**2)*(1.0/pnoise**2)
+
+					iHess2 = tau*ScatterScale*w*(1+tau**2*ScatterScale**2*w**2*(tau**2*ScatterScale**2*w**2 - 6))*np.log(10.0)**2*HessDenom*PVec[self.NFBasis:]
+					iGrad2 = -tau*ScatterScale*w*(tau**2*ScatterScale**2*w**2 - 1)*np.log(10.0)*GradDenom*PVec[self.NFBasis:]
+					iFunc2 = (self.ProfileFData[i][self.NFBasis:] - PVec[self.NFBasis:]*np.imag(Conv))
+
+					FullImagHess = -1*(iHess2*iFunc2 + iGrad2**2)*(1.0/pnoise**2)
+				
+
+					profhess = np.zeros(2*self.NFBasis)
+					profhess[:self.NFBasis] = FullRealHess
+					profhess[self.NFBasis:] = FullImagHess
+
+					profgrad = np.zeros(2*self.NFBasis)
+					profgrad[:self.NFBasis] = -0.5*rGrad2*(1.0/pnoise**2)
+					profgrad[self.NFBasis:] = -0.5*iGrad2*(1.0/pnoise**2)
+
+					Hessian[pcount+c,pcount+c] += np.sum(profhess)
+					print c, i, Hessian[pcount+c,pcount+c]
+					pcount += 1
+
 
 		self.hess = Hessian
+
+
+	def calculateFFTHessian(self,x):
+
+		pcount = 0
+		phase=x[0]*self.ReferencePeriod
+		pcount += 1
+
+		NCoeff = self.MaxCoeff-1
+		#pcount += 1
+
+
+		ShapeAmps=np.zeros([self.MaxCoeff, self.EvoNPoly+1])
+		ShapeAmps[0][0] = 1
+		ShapeAmps[1:]=x[pcount:pcount+(self.MaxCoeff-1)*(self.EvoNPoly+1)].reshape([(self.MaxCoeff-1),(self.EvoNPoly+1)])
+
+
+		pcount += (self.MaxCoeff-1)*(self.EvoNPoly+1)
+
+		TimingParameters=x[pcount:pcount+self.numTime]
+		pcount += self.numTime
+
+		ScatteringParameters = 10.0**x[pcount:pcount+self.NScatterEpochs]
+		pcount += self.NScatterEpochs
+
+		loglike = 0
+
+		TimeSignal = np.dot(self.designMatrix, TimingParameters)
+
+		xS = self.ShiftedBinTimes[:,0]-phase
+
+		if(self.numTime>0):
+			xS -= TimeSignal
+
+		xS = ( xS + self.ReferencePeriod/2) % (self.ReferencePeriod ) - self.ReferencePeriod/2
+
+		InterpBins = (xS%(self.ReferencePeriod/self.Nbins[:])/self.InterpolatedTime).astype(int)
+		WBTs = xS-self.InterpolatedTime*InterpBins
+		RollBins=(np.round(WBTs/(self.ReferencePeriod/self.Nbins[:]))).astype(np.int)
+
+
+		#Multiply and shift out the shapelet model
+
+		s=[np.roll(np.dot(self.InterpBasis[InterpBins[i]][:,:NCoeff+1], np.sum(((self.psr.freqs[i] - self.EvoRefFreq)/1000.0)**np.arange(0,self.EvoNPoly+1)*ShapeAmps, axis=1)), -RollBins[i]) for i in range(len(RollBins))]
+
+		j=[np.roll(np.dot(self.InterpJitterMatrix[InterpBins[i]][:,:NCoeff+1], np.sum(((self.psr.freqs[i] - self.EvoRefFreq)/1000.0)**np.arange(0,self.EvoNPoly+1)*ShapeAmps, axis=1)), -RollBins[i]) for i in range(len(RollBins))]
+
+
+		FFTS = np.sum([np.dot(self.InterpFBasis[InterpBins], ShapeAmps[:,i])*(((self.psr.freqs - self.EvoRefFreq)/1000.0)**i).reshape(self.NToAs,1) for i in range(self.EvoNPoly+1)], axis=0)
+		FFTJ = np.fft.rfft(j, axis=1)[:,1:self.NFBasis+1]
+
+		HessSize = self.n_params
+		Hessian = np.zeros([HessSize,HessSize])
+		LinearSize = 1 + (self.MaxCoeff-1)*(self.EvoNPoly+1) + self.numTime
+
+		for i in range(self.NToAs):
+
+			rfftfreqs=np.linspace(1,self.NFBasis,self.NFBasis)/self.Nbins[i]
+
+			RollVec = np.exp(2*np.pi*RollBins[i]*rfftfreqs*1j)
+			FFTS[i] = FFTS[i]*RollVec
+			OneProf = FFTS[i]
+			FFTJ[i] = FFTJ[i]#*RollVec
+
+			if(self.NScatterEpochs > 0):
+
+				ScatterScale = self.psr.ssbfreqs()[i]**4/10.0**(9.0*4.0)
+				STime = np.sum(ScatteringParameters[self.ScatterInfo[i]])/ScatterScale
+				ScatterVec = self.ConvolveExp(rfftfreqs*self.Nbins[i]/self.ReferencePeriod, STime)
+
+				OneProf = OneProf*ScatterVec
+				FFTJ[i] = FFTJ[i]*ScatterVec
+
+
+
+
+			FS = np.zeros(2*self.NFBasis)
+			FS[:self.NFBasis] = np.real(OneProf)
+			FS[self.NFBasis:] = np.imag(OneProf)
+
+			FJ = np.zeros(2*self.NFBasis)
+			FJ[:self.NFBasis] = np.real(FFTJ[i])
+			FJ[self.NFBasis:] = np.imag(FFTJ[i])
+
+			FSdot = np.sqrt(np.dot(FS,FS)/(2*self.NFBasis))
+
+			FS /= FSdot
+			FJ /= FSdot
+
+
+
+			pnoise = self.ProfileInfo[i,6]*np.sqrt(self.Nbins[i])/np.sqrt(2)
+
+			MNM = np.dot(FS, FS)/(pnoise*pnoise)
+			InvMNM = 1.0/MNM
+
+			dNM = np.dot(self.ProfileFData[i], FS)/(pnoise*pnoise)
+			dNMMNM = dNM*InvMNM
+
+			MLAmp = dNMMNM
+			MLSigma = pnoise
+
+
+			HessMatrix = np.zeros([LinearSize, 2*self.NFBasis])
+
+			print "ML Amp/Noise: ", i, MLAmp, MLSigma
+			#Phase First
+			PhaseScale = MLAmp/MLSigma
+
+			pcount = 0
+			HessMatrix[pcount,:] = PhaseScale*FJ*self.ReferencePeriod
+			pcount += 1
+
+
+			#Hessian for Shapelet parameters
+			fvals = ((self.psr.freqs[i] - self.EvoRefFreq)/1000.0)**np.arange(0,self.EvoNPoly+1)
+
+			OriginalBasis = (self.InterpFBasis[InterpBins[i]].T*RollVec).T
+			if(self.NScatterEpochs > 0):
+				OriginalBasis = (OriginalBasis.T*ScatterVec).T
+
+			OneBasis = np.zeros([2*self.NFBasis, self.MaxCoeff])
+			OneBasis[:self.NFBasis] = np.real(OriginalBasis)
+			OneBasis[self.NFBasis:] = np.imag(OriginalBasis)
+
+
+			for c in range(1, self.MaxCoeff):
+				for p in range(self.EvoNPoly+1):
+					HessMatrix[pcount,:] = fvals[p]*OneBasis[:,c]*MLAmp/MLSigma
+					pcount += 1
+
+			#Hessian for Timing Model
+
+			for c in range(self.numTime):
+				HessMatrix[pcount,:] = FJ*PhaseScale*self.designMatrix[i,c]
+				pcount += 1
+
+
+			OneHess = np.dot(HessMatrix, HessMatrix.T)
+			Hessian[:LinearSize, :LinearSize] += OneHess
+			'''
+			for c in range(LinearSize):
+				for d in range(LinearSize):
+					print "Lin Hess:", c, d, OneHess[c,d]
+
+			'''
+
+			for c in range(self.NScatterEpochs):
+				if(c in self.ScatterInfo[i]):
+
+					tau = ScatteringParameters[c]
+					f = np.linspace(1,self.NFBasis,self.NFBasis)/self.ReferencePeriod
+					w = 2.0*np.pi*f
+					ISS = 1.0/(self.psr.ssbfreqs()[i]**4/10.0**(9.0*4.0))
+
+					Conv = self.ConvolveExp(f, tau*ISS)
+					#MLProf = MLAmp*FFTS[i]#/FSdot
+					#ConvProf = Conv*MLProf
+
+
+					RConv = np.real(Conv)
+					IConv = np.imag(Conv)
+
+
+					#PVec = np.zeros(2*self.NFBasis)
+					#PVec[:self.NFBasis] = MLAmp*np.real(FFTS[i])/FSdot
+					#PVec[self.NFBasis:] = MLAmp*np.imag(FFTS[i])/FSdot
+
+					RProf = MLAmp*np.real(FFTS[i])/FSdot
+					IProf = MLAmp*np.imag(FFTS[i])/FSdot
+
+					pnoise = self.ProfileInfo[i,6]*np.sqrt(self.Nbins[i])/np.sqrt(2)
+					'''
+					dval=self.ProfileFData[i][0]
+					prval=PVec[:self.NFBasis][0]
+					pival=PVec[self.NFBasis:][0]
+					wval=w[0]
+					sval=ISS
+					tval=np.log10(tau)
+					oval = pnoise
+					dval, prval, pival, wval, sval, tval,oval
+
+					dival=self.ProfileFData[i][self.NFBasis]
+					prval=PVec[:self.NFBasis][0]
+					pival=PVec[self.NFBasis:][0]
+					wval=w[0]
+					sval=ISS
+					tval=np.log10(tau)
+					oval = pnoise
+					dival, prval, pival, wval, sval, tval,oval
+					'''
+					HessDenom = 1.0/(1.0 + tau**2*w**2*ISS**2)**3
+					GradDenom = 1.0/(1.0 + tau**2*w**2*ISS**2)**2
+
+					Reaself = (self.ProfileFData[i][:self.NFBasis] - RProf*RConv + IProf*IConv)
+					RealGrad = 2*tau**2*ISS**2*w**2*np.log(10.0)*GradDenom*RProf + tau*ISS*w*(tau**2*ISS**2*w**2 - 1)*np.log(10.0)*GradDenom*IProf
+					RealHess = -(4*tau**2*ISS**2*w**2*(tau**2*ISS**2*w**2 - 1)*np.log(10.0)**2)*HessDenom*RProf - tau*ISS*w*(1+tau**2*ISS**2*w**2*(tau**2*ISS**2*w**2 - 6))*np.log(10.0)**2*HessDenom*IProf
+
+					FullRealHess = 1*(RealHess*Reaself + RealGrad**2)*(1.0/pnoise**2)
+
+					ImagFunc = (self.ProfileFData[i][self.NFBasis:] - RProf*IConv - IProf*RConv)
+					ImagGrad = 2*tau**2*ISS**2*w**2*np.log(10.0)*GradDenom*IProf - tau*ISS*w*(tau**2*ISS**2*w**2 - 1)*np.log(10.0)*GradDenom*RProf
+					ImagHess = -(4*tau**2*ISS**2*w**2*(tau**2*ISS**2*w**2 - 1)*np.log(10.0)**2)*HessDenom*IProf + tau*ISS*w*(1+tau**2*ISS**2*w**2*(tau**2*ISS**2*w**2 - 6))*np.log(10.0)**2*HessDenom*RProf
+
+
+
+					FullImagHess = 1*(ImagHess*ImagFunc + ImagGrad**2)*(1.0/pnoise**2)
+
+
+					profhess = np.zeros(2*self.NFBasis)
+					profhess[:self.NFBasis] = FullRealHess
+					profhess[self.NFBasis:] = FullImagHess
+
+					profgrad = np.zeros(2*self.NFBasis)
+					profgrad[:self.NFBasis] = RealGrad*(1.0/pnoise)
+					profgrad[self.NFBasis:] = ImagGrad*(1.0/pnoise)
+
+					LinearScatterCross = np.dot(HessMatrix, profgrad)
+
+					
+					
+
+					Hessian[pcount+c,pcount+c] += np.sum(profhess)
+					Hessian[:LinearSize, pcount+c] += -LinearScatterCross
+					Hessian[pcount+c, :LinearSize] += -LinearScatterCross
+					
+					pcount += 1
+
+
+		self.hess = Hessian
+
 
 	def calculateShapePhaseCov(self,x):
 
@@ -1445,14 +1878,109 @@ class Likelihood(object):
 		return q, qxy
 	'''
 
-	def ConvolveExp(self, x, tau):
+	def ConvolveExp(self, f, tau, returngrad=False):
 
-		tsig = np.exp(-x/tau)
-		fsig = np.fft.rfft(tsig)
+		w = 2.0*np.pi*f
+		fanalytic = 1.0/(w**2*tau**2+1) - 1j*w*tau/(w**2*tau**2+1)
 
-		f = np.abs(np.fft.fftfreq(len(x))[:len(x)/2+1])
-		fanalytic = 1j*tau/(1j + tau*f)
+		if(returngrad==False):
+			return fanalytic
+		else:
+			grad = (1.0 - tau**2*w**2)/(tau**2*w**2 + 1)**2 - 1j*tau*w/(tau**2*w**2 + 1)**2 
 
-		return tsig, fsig, fanalytic
+	def GetScatteringParams(self, mode='parfile', flag = None, timestep = None):
+
+		SXParamList = [None]*self.NToAs
+
+		if(mode == 'parfile'):
+			allparams=self.psr.pars(which='set')
+			SXList = [sx for sx in allparams if 'SX_' in sx]
+
+			self.NScatterEpochs = len(SXList)
+
+		
+			for i in range(self.NScatterEpochs):
+				mintime = self.psr['SXR1_'+SXList[i][-4:]].val
+				maxtime = self.psr['SXR2_'+SXList[i][-4:]].val
+
+				select_indices = np.where(np.logical_and( self.psr.stoas < maxtime, self.psr.stoas >=mintime))[0]
+
+				for index in select_indices:
+					#print index, self.psr.stoas[index], SXList[i]
+					if(SXParamList[index] == None):
+						SXParamList[index] = [i]
+					else:
+						SXParamList[index].append(i)
+
+		if(mode == 'flag'):
+			scatterflags = np.unique(self.psr.flagvals(flag))
+			self.NScatterEpochs = len(scatterflags)
+			for i in range(self.NScatterEpochs):
+				select_indices = np.where(self.psr.flagvals(flag) ==  scatterflags[i])[0] 
+				for index in select_indices:
+					print index, self.psr.stoas[index], scatterflags[i]
+					if(SXParamList[index] == None):
+						SXParamList[index] = [i]
+					else:
+						SXParamList[index].append(i)
+
+		if(mode == 'time'):
+			startMJD = np.min(self.psr.stoas)
+			endMJD = np.max(self.psr.stoas)
+			self.NScatterEpochs = (endMJD-startMJD)/time
+			for i in range(self.NScatterEpochs):
+				select_indices = np.where(np.logical_and( self.psr.stoas < startMJD+(i+1)*time, self.psr.stoas >= startMJD+i*time))[0]
+				for index in select_indices:
+					print index, self.psr.stoas[index]
+					if(SXParamList[index] == None):
+						SXParamList[index] = [i]
+					else:
+						SXParamList[index].append(i)
+
+		
+		return SXParamList
 
 
+#def PrintEpochParams(time):
+		
+
+	def PrintEpochParams(self, time, string ='DMX'):
+
+		time=30
+		stoas = self.psr.stoas
+		mintime = stoas.min()
+		maxtime = stoas.max()
+
+		NEpochs = (maxtime-mintime)/time
+		Epochs=mintime - time*0.01 + np.arange(NEpochs)*time #np.linspace(mintime-time*0.01, maxtime+time*0.01, int(NEpochs+3))
+		EpochList = []
+		for i in range(len(Epochs)-1):
+			select_indices = np.where(np.logical_and( stoas < Epochs[i+1], stoas >= Epochs[i]))[0]
+			if(len(select_indices) > 0):
+				EpochList.append(i)
+
+		EpochList = np.unique(np.array(EpochList))
+		for i in range(len(EpochList)):
+			if(i < 9):
+				print string+"_000"+str(i+1)+" -2.90883832 0"
+				print string+"R1_000"+str(i+1)+" "+str(Epochs[EpochList[i]])
+				print string+"R2_000"+str(i+1)+" "+str(Epochs[EpochList[i]+1])
+				print string+"ER_000"+str(i+1)+" 0.20435656\n"
+
+			if(i < 99 and i >= 9):
+				print string+"_00"+str(i+1)+" -2.90883832 0"
+				print string+"R1_00"+str(i+1)+" "+str(Epochs[EpochList[i]])
+				print string+"R2_00"+str(i+1)+" "+str(Epochs[EpochList[i]+1])
+				print string+"ER_00"+str(i+1)+" 0.20435656\n"
+
+			if(i < 999 and i >= 99):
+				print string+"_0"+str(i+1)+" -2.90883832 0"
+				print string+"R1_0"+str(i+1)+" "+str(Epochs[EpochList[i]])
+				print string+"R2_0"+str(i+1)+" "+str(Epochs[EpochList[i]+1])
+				print string+"ER_0"+str(i+1)+" 0.20435656\n"
+
+			if(i < 9999 and i >= 999):
+				print string+"_"+str(i+1)+" -2.90883832 0"
+				print string+"R1_"+str(i+1)+" "+str(Epochs[EpochList[i]])
+				print string+"R2_"+str(i+1)+" "+str(Epochs[EpochList[i]+1])
+				print string+"ER_"+str(i+1)+" 0.20435656\n"

@@ -13,15 +13,15 @@ from Class import *
 
 lfunc = Likelihood()
 
-lfunc.loadPulsar("OneChan.par", "OneChan.tim")
+lfunc.loadPulsar("Sim.par", "OneEpoch.Noise.tim")
 
 
 '''Get initial Fit to the Profile'''
 
-lfunc.TScrunch(doplot = False, channels = 1)
+lfunc.TScrunch(doplot = True, channels = 1)
 
 
-lfunc.getInitialParams(MaxCoeff = 100, x0=[0.0, -2.0, 2.0], cov_diag=[0.1, 0.1, 1.0], resume=True)
+lfunc.getInitialParams(MaxCoeff = 2, x0=[-0.21, -1.6, np.log10(1.5)], cov_diag=[0.1, 0.1, 0.1], resume=False, outDir = './InitChains/', sampler='pal')
 
 
 
@@ -30,7 +30,7 @@ lfunc.getInitialParams(MaxCoeff = 100, x0=[0.0, -2.0, 2.0], cov_diag=[0.1, 0.1, 
 lfunc.PreComputeShapelets(interpTime = 1, MeanBeta = lfunc.MeanBeta)
 
 lfunc.getInitialPhase(doplot = True)
-
+lfunc.ScatterInfo = lfunc.GetScatteringParams()
 
 
 
@@ -42,16 +42,19 @@ for i in range(lfunc.MaxCoeff-1):
 		parameters.append('S'+str(i)+'E'+str(j))
 for i in range(lfunc.numTime):
 	parameters.append(lfunc.psr.pars()[i])
-
+for i in range(lfunc.NScatterEpochs):
+	parameters.append("Scatter_"+str(i))
 
 
 print parameters
 n_params = len(parameters)
 print n_params
-
+lfunc.n_params = n_params
     
 pmin = np.array(np.ones(n_params))*-100
 pmax = np.array(np.ones(n_params))*100
+
+pmin[-1] = -5
 
 
 lfunc.pmin = pmin
@@ -72,11 +75,14 @@ for i in range(lfunc.MaxCoeff-1):
 for i in range(lfunc.numTime):
 	x0[pcount+i] = 0
 pcount += lfunc.numTime
+for i in range(lfunc.NScatterEpochs):
+	x0[pcount+i] = -2
+pcount += lfunc.NScatterEpochs
 
 
 lfunc.calculateHessian(x0)
 covM=np.linalg.inv(lfunc.hess)
-lfunc.PhasePrior = np.sqrt(covM[0,0])*lfunc.ReferencePeriod
+lfunc.PhasePrior = 1000*np.sqrt(covM[0,0])*lfunc.ReferencePeriod
 lfunc.MeanPhase = lfunc.MeanPhase*lfunc.ReferencePeriod
 
 
@@ -93,7 +99,7 @@ plist = [0,1,3,5,7,9,11]
 lfunc.doplot=False
 burnin=1000
 sampler = ptmcmc.PTSampler(ndim=n_params,logl=lfunc.FFTMarginLogLike,logp=lfunc.my_prior,
-                            cov=covM, outDir='./FFTChains4/',resume=False)
+                            cov=covM, outDir='./ScatterChain/',resume=False)
 sampler.addProposalToCycle(lfunc.TimeJump, 20)
 sampler.sample(p0=x0,Niter=30000,isave=10,burn=burnin,thin=1,neff=1000)
 '''
