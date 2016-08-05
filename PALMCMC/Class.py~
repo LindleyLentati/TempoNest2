@@ -1442,7 +1442,7 @@ class Likelihood(object):
 					if(like > mlike):
 						mlike = like
 						mphase = np.ones(1)*phase
-						#print mphase, mlike
+						print mphase, mlike
 
 		
 				minphase = mphase - stepsize
@@ -2159,7 +2159,7 @@ class Likelihood(object):
 
 			HessMatrix = np.zeros([LinearSize, 2*self.NFBasis])
 
-			#print "ML Amp/Noise: ", i, MLAmp, MLSigma
+			print "ML Amp/Noise: ", i, MLAmp, MLSigma
 			#Phase First
 			PhaseScale = MLAmp/MLSigma
 
@@ -2562,7 +2562,7 @@ class Likelihood(object):
 
 		fig, (ax1, ax2) = plt.subplots(2,1)
 
-		im1 = ax1.imshow(np.log10(np.abs(Data)), interpolation="none", extent=(np.min(x), np.max(x), 0, 1), aspect=aspect)
+		im1 = ax1.imshow(np.log10(np.abs(Data)), interpolation="none", extent=(x[0], x[-1], 0, 1), aspect=aspect)
 		#divider1 = make_axes_locatable(ax1)
 		# Append axes to the right of ax3, with 20% width of ax3
 		#cax1 = divider1.append_axes("right", size="20%", pad=0.05)
@@ -2571,7 +2571,7 @@ class Likelihood(object):
 		# and the format of the ticklabels with kwarg `format`
 		#cbar1 = plt.colorbar(im1, cax=cax1, ticks=MultipleLocator(0.2), format="%.2f")
 
-		im2 = ax2.imshow(np.abs(Res), interpolation="none", extent=(np.min(x), np.max(x), 0, 1), aspect=aspect)
+		im2 = ax2.imshow(np.abs(Res), interpolation="none", extent=(x[0], x[-1], 0, 1), aspect=aspect)
 		#divider2 = make_axes_locatable(ax2)
 		# Append axes to the right of ax3, with 20% width of ax3
 		#cax2 = divider2.append_axes("right", size="20%", pad=0.05)
