@@ -806,7 +806,7 @@ class Likelihood(object):
 				return -np.inf
 
 			if(self.returnVal == 1):
-				ShapeErrs = np.sqrt(np.linalg.inv(MTM.copy()).diagonal())[1:]
+				ShapeErrs = np.sqrt(np.linalg.inv(MTM.copy()).diagonal())
 
 			loglike = 0
 			MLCoeff=[]
@@ -862,61 +862,79 @@ class Likelihood(object):
 			MLCoeff=[]
 			MLErrs = []
 
-			FullMatrix = np.fft.rfft(FullMatrix, axis=1)
+			FullMatrix = FullCompMatrix
 			for i in range(self.TScrunchChans):
 
 				ScatterScale = (self.TScrunchedFreqs[i]*10.0**6)**4/10.0**(9.0*4.0)
 				STime = STau/ScatterScale
 				ScatterVec = self.ConvolveExp(np.linspace(0, ScrunchBins/2, ScrunchBins/2+1)/self.ReferencePeriod, STime)
 
-				FFTMatrix = FullMatrix*ScatterVec
-				ScatterMatrix = np.fft.irfft(FFTMatrix, axis=1)
+				ScatterMatrix = FullMatrix*ScatterVec
 
-				MTM = np.dot(ScatterMatrix, ScatterMatrix.T)
+				RealCompMatrix[:,:len(2*np.pi*rfftfreqs)-1] = np.real(ScatterMatrix[:,1:len(2*np.pi*rfftfreqs)])
+				RealCompMatrix[:,len(2*np.pi*rfftfreqs)-1:] = -1*np.imag(ScatterMatrix[:,1:len(2*np.pi*rfftfreqs)])
 
-				Prior = 1000.0
-				diag=MTM.diagonal().copy()
-				diag += 1.0/Prior**2
-				np.fill_diagonal(MTM, diag)
+				
+
+				MTM = np.dot(RealCompMatrix, RealCompMatrix.T)
+
+				#Prior = 1000.0
+				#diag=MTM.diagonal().copy()
+				#diag += 1.0/Prior**2
+				#np.fill_diagonal(MTM, diag)
 				try:
 					Chol_MTM = sp.linalg.cho_factor(MTM.copy())
 				except:
 					return -np.inf
 
 				if(self.returnVal == 1):
-					ShapeErrs = np.sqrt(np.linalg.inv(MTM.copy()).diagonal())[1:]
+					ShapeErrs = np.sqrt(np.linalg.inv(MTM.copy()).diagonal())
 
-				Md = np.dot(ScatterMatrix, self.TScrunched[i])			
+				FFTScrunched = np.fft.rfft(self.TScrunched[i])
+				RealFFTScrunched = np.zeros(2*len(2*np.pi*rfftfreqs)-2)
+				RealFFTScrunched[:len(2*np.pi*rfftfreqs)-1] = np.real(FFTScrunched[1:])
+				RealFFTScrunched[len(2*np.pi*rfftfreqs)-1:] = np.imag(FFTScrunched[1:])				
+
+				Md = np.dot(RealCompMatrix, RealFFTScrunched)			
 				ML = sp.linalg.cho_solve(Chol_MTM, Md)
 
-				s = np.dot(ScatterMatrix.T, ML)
+				s = np.dot(RealCompMatrix.T, ML)
 
-				r = self.TScrunched[i] - s	
+				r = RealFFTScrunched - s	
 
 				#for bin in range(1024):
 				#	print i, bin, self.TScrunched[i][bin], s[bin], self.TScrunchedNoise[i]
 
 
-				chanlike  = -0.5*np.sum(r**2)/self.TScrunchedNoise[i]**2 - 0.5*np.log(self.TScrunchedNoise[i]**2)*ScrunchBins
+				noise = self.TScrunchedNoise[i]*np.sqrt(ScrunchBins)/np.sqrt(2)
+				chanlike  = -0.5*np.sum(r**2)/noise**2 - 0.5*np.log(noise**2)*len(RealFFTScrunched)
 
 				loglike += chanlike
 
 				#print i, chanlike, self.TScrunchedNoise[i]
 				if(self.doplot == 1):
 
-				    plt.plot(np.linspace(0,1,ScrunchBins), self.TScrunched[i])
-				    plt.plot(np.linspace(0,1,ScrunchBins),s)
+				    bd = np.fft.rfft(self.TScrunched[i])
+				    bd[0] = 0 + 0j
+				    bdt = np.fft.irfft(bd)
+
+				    bm = np.zeros(len(np.fft.rfft(self.TScrunched[i]))) + 0j
+				    bm[1:] = s[:len(s)/2] + 1j*s[len(s)/2:]
+				    bmt = np.fft.irfft(bm)
+
+				    plt.plot(np.linspace(0,1,ScrunchBins), bdt, color='black')
+				    plt.plot(np.linspace(0,1,ScrunchBins), bmt, color='red')
 				    plt.xlabel('Phase')
 				    plt.ylabel('Profile Amplitude')
 				    plt.show()
-				    plt.plot(np.linspace(0,1,ScrunchBins),self.TScrunched[i]-s)
+				    plt.plot(np.linspace(0,1,ScrunchBins),bdt-bmt)
 				    plt.xlabel('Phase')
 				    plt.ylabel('Profile Residuals')
 				    plt.show()
 			
 				if(self.returnVal == 1):
-				    zml=ML[1]
-				    MLCoeff.append(ML[1:]/zml)
+				    zml=ML[0]
+				    MLCoeff.append(ML/zml)
 				    #print ShapeErrs, ML
 				    MLErrs.append(ShapeErrs*self.TScrunchedNoise[i]/zml)
 
@@ -2504,43 +2522,45 @@ class Likelihood(object):
 #def PrintEpochParams(time):
 		
 
-	def PrintEpochParams(self, time, string ='DMX'):
+	def PrintEpochParams(self, time=30, string ='DMX'):
 
-		time=30
+		totalinEpochs = 0
 		stoas = self.psr.stoas
 		mintime = stoas.min()
 		maxtime = stoas.max()
 
 		NEpochs = (maxtime-mintime)/time
-		Epochs=mintime - time*0.01 + np.arange(NEpochs)*time #np.linspace(mintime-time*0.01, maxtime+time*0.01, int(NEpochs+3))
+		Epochs=mintime - time*0.01 + np.arange(NEpochs+1)*time #np.linspace(mintime-time*0.01, maxtime+time*0.01, int(NEpochs+3))
 		EpochList = []
 		for i in range(len(Epochs)-1):
 			select_indices = np.where(np.logical_and( stoas < Epochs[i+1], stoas >= Epochs[i]))[0]
 			if(len(select_indices) > 0):
+				print "There are ", len(select_indices), " profiles in Epoch ", i
+				totalinEpochs += len(select_indices)
 				EpochList.append(i)
-
+		print "Total profiles in Epochs: ", totalinEpochs, " out of ", self.psr.nobs
 		EpochList = np.unique(np.array(EpochList))
 		for i in range(len(EpochList)):
 			if(i < 9):
-				print string+"_000"+str(i+1)+" -2.90883832 0"
+				print string+"_000"+str(i+1)+" 0 1"
 				print string+"R1_000"+str(i+1)+" "+str(Epochs[EpochList[i]])
 				print string+"R2_000"+str(i+1)+" "+str(Epochs[EpochList[i]+1])
 				print string+"ER_000"+str(i+1)+" 0.20435656\n"
 
 			if(i < 99 and i >= 9):
-				print string+"_00"+str(i+1)+" -2.90883832 0"
+				print string+"_00"+str(i+1)+" 0 1"
 				print string+"R1_00"+str(i+1)+" "+str(Epochs[EpochList[i]])
 				print string+"R2_00"+str(i+1)+" "+str(Epochs[EpochList[i]+1])
 				print string+"ER_00"+str(i+1)+" 0.20435656\n"
 
 			if(i < 999 and i >= 99):
-				print string+"_0"+str(i+1)+" -2.90883832 0"
+				print string+"_0"+str(i+1)+" 0 1"
 				print string+"R1_0"+str(i+1)+" "+str(Epochs[EpochList[i]])
 				print string+"R2_0"+str(i+1)+" "+str(Epochs[EpochList[i]+1])
 				print string+"ER_0"+str(i+1)+" 0.20435656\n"
 
 			if(i < 9999 and i >= 999):
-				print string+"_"+str(i+1)+" -2.90883832 0"
+				print string+"_"+str(i+1)+" 0 1"
 				print string+"R1_"+str(i+1)+" "+str(Epochs[EpochList[i]])
 				print string+"R2_"+str(i+1)+" "+str(Epochs[EpochList[i]+1])
 				print string+"ER_"+str(i+1)+" 0.20435656\n"
