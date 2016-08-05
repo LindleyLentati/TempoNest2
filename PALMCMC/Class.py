@@ -618,6 +618,9 @@ class Likelihood(object):
 			ML=chains.T[burnin:][np.argmax(chains[-3][burnin:])][:n_params]
 
 		elif(sampler == 'multinest'):
+                        
+                        if not os.path.exists(outDir):
+                            os.makedirs(outDir)
 
 			pymultinest.run(self.MNFFTInitialLogLikeWrap, self.MNprior, n_params, importance_nested_sampling = False, resume = resume, verbose = True, sampling_efficiency = 'model', multimodal=False, n_live_points = mn_live, outputfiles_basename=outDir)
 
