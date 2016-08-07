@@ -452,7 +452,7 @@ class Likelihood(object):
 		coeffs=self.MLShapeCoeff
 		coeffs=np.array(coeffs).T
 
-		Ncoeff=self.MaxCoeff
+		Ncoeff=np.sum(self.MaxCoeff)
 
 		RefCoeffs=np.zeros(Ncoeff)
 
