@@ -3,6 +3,7 @@ import libstempo as T
 import psrchive
 import numpy as np
 import matplotlib.pyplot as plt
+import scipy.linalg as sl
 import PTMCMCSampler
 from PTMCMCSampler import PTMCMCSampler as ptmcmc
 import scipy as sp
@@ -12,12 +13,30 @@ import math
 import os
 import threading, subprocess
 import pickle
+import copy as copy
+import time
+import ghs
+
+HaveGPUS = False
+try:
+	import pycuda.autoinit
+	import pycuda.gpuarray as gpuarray
+	from pycuda.compiler import SourceModule
+	import skcuda.cublas as cublas
+	HaveGPUS = True
+except:
+	print "GPU modules not available (or broken)  :( \n"
+
 
 class Likelihood(object):
     
-	def __init__(self):
+	def __init__(self, useGPU = False):
 	
 		
+
+		self.useGPU = useGPU
+
+
 		self.SECDAY = 24*60*60
 
 		self.parfile = None
@@ -75,15 +94,16 @@ class Likelihood(object):
 		self.startPoint = None
 		self.cov_diag = None
 		self.hess = None
-		self.eigM = None
-		self.eigV = None
+		self.EigM = None
+		self.EigV = None
+		self.GHSoutfile = None
 
 		self.InterpolatedTime = None
 		self.InterpBasis = None
 		self.InterpJitterMatrix = None
 
 		self.InterpFBasis = None
-		self.InterpFJitterMatrix = None
+		self.InterpJBasis = None
 		self.OneFBasis = None
 
 
@@ -104,6 +124,97 @@ class Likelihood(object):
 		self.fitNComps = False
 		self.NScatterEpochs = 0
 		self.ScatterInfo = None
+
+
+
+
+		if(self.useGPU == True):
+
+			self.CUhandle = cublas.cublasCreate()
+
+			mod = SourceModule("""
+
+					    #include <stdint.h>
+					
+					    __global__ void BinTimes(double *BinTimes, int32_t *NBins, double Phase, double *TimeSignal, double RefPeriod, double InterpTime, double *xS, int32_t  *InterpBins, double *WBTs, int32_t *RollBins, uint64_t *InterpPointers, uint64_t *SomePointers, uint64_t *InterpJPointers, uint64_t *SomeJPointers, const int32_t NToAs){
+
+			                        const int i = blockDim.x*blockIdx.x + threadIdx.x;
+
+						if(i < NToAs){
+							xS[i] = BinTimes[i]  - Phase - TimeSignal[i] + RefPeriod*0.5; 
+
+							xS[i] = xS[i] - trunc(xS[i]/RefPeriod)*RefPeriod; 
+							xS[i] = xS[i]+RefPeriod - trunc((xS[i]+RefPeriod)/RefPeriod)*RefPeriod;
+							xS[i] = xS[i] - RefPeriod*0.5;
+						
+							double InterpBin = xS[i] - trunc(xS[i]/(RefPeriod/NBins[i]))*(RefPeriod/NBins[i]);
+							InterpBin = InterpBin + RefPeriod/NBins[i]  - trunc((InterpBin+RefPeriod/NBins[i])/(RefPeriod/NBins[i]))*(RefPeriod/NBins[i]);
+							InterpBin /= InterpTime;
+							InterpBins[i] = int(InterpBin);
+						
+							SomePointers[i] = InterpPointers[InterpBins[i]];
+							
+							SomeJPointers[i] = InterpJPointers[InterpBins[i]];
+						
+							WBTs[i] = xS[i]-InterpTime*InterpBins[i];
+							RollBins[i] = int(round(WBTs[i]/(RefPeriod/NBins[i])));
+						}
+												
+                   			}
+
+			                    __global__ void PrepLikelihood(double *ProfAmps, double *ShapeAmps, const int32_t NToAs, const int32_t TotCoeff){
+                        			
+						const int i = blockDim.x*blockIdx.x + threadIdx.x;
+						//double freq = ToAFreqs[i];
+						
+						if(i < TotCoeff*NToAs){
+							
+							int index = i%TotCoeff;
+							double amp = ShapeAmps[index];
+					
+							ProfAmps[i] = amp;
+							
+						}
+						
+                   			}
+                   
+                   
+			                    __global__ void RotateData(double *data, double *freqs, const int32_t *RollBins, const int32_t *ToAIndex, double *RolledData, const int32_t Step){
+	
+        			                const  int i = blockDim.x*blockIdx.x + threadIdx.x;
+
+						if(i < Step){
+							double freq = freqs[i];
+							const int32_t  ToA_Index = ToAIndex[i];  
+							const int32_t Roll = RollBins[ToA_Index];
+							double RealRoll = cos(-2*M_PI*Roll*freq);
+							double ImagRoll = sin(-2*M_PI*Roll*freq);
+						
+							RolledData[i] = RealRoll*data[i] - ImagRoll*data[i+Step];
+							RolledData[i+Step] = ImagRoll*data[i] + RealRoll*data[i+Step];
+						}
+                   			}
+                   
+			                    __global__ void getRes(double *ResVec, double *NResVec, double *RolledData, double *Signal, double *Amps, double *Noise, const int32_t *ToAIndex, const int32_t *SignalIndex, const int32_t TotBins){
+
+			                        const int i = blockDim.x*blockIdx.x + threadIdx.x;
+
+						if(i < TotBins){
+		        			        const int32_t ToA_Index = ToAIndex[i];  
+							const int32_t Signal_Index = SignalIndex[i];  
+					
+							ResVec[Signal_Index] = RolledData[i]-Amps[ToA_Index]*Signal[Signal_Index];
+							NResVec[Signal_Index] = ResVec[Signal_Index]/Noise[ToA_Index];
+						}
+						
+                   			}
+ 					""")
+ 					
+			self.GPURotateData = mod.get_function("RotateData")
+			self.GPUGetRes = mod.get_function("getRes")
+			self.GPUBinTimes = mod.get_function("BinTimes")
+			self.GPUPrepLikelihood = mod.get_function("PrepLikelihood")
+
 
 	import time, sys
 
@@ -1240,15 +1351,25 @@ class Likelihood(object):
 			#InterpJitterMatrix = np.array(InterpJitterMatrix)
 			print("\nFinished Computing Interpolated Profiles")
 
+			self.NFBasis = upperindex - 1
 
-			self.InterpFBasis = InterpFShapeMatrix[:,1:upperindex]
-			self.InterpFJitterMatrix = InterpFJitterMatrix[:,1:upperindex]
+			self.InterpFBasis = np.zeros([numtointerpolate, self.NFBasis*2, self.TotCoeff])
+			self.InterpJBasis = np.zeros([numtointerpolate, self.NFBasis*2, self.TotCoeff])
+		
+			self.InterpFBasis[:,:self.NFBasis,:] = InterpFShapeMatrix[:,1:upperindex].real
+			self.InterpFBasis[:,self.NFBasis:,:] = InterpFShapeMatrix[:,1:upperindex].imag
+
+			self.InterpJBasis[:,:self.NFBasis,:] = InterpFJitterMatrix[:,1:upperindex].real
+			self.InterpJBasis[:,self.NFBasis:,:] = InterpFJitterMatrix[:,1:upperindex].imag
+
+			#self.InterpFBasis = InterpFShapeMatrix[:,1:upperindex]
+			#self.InterpFJitterMatrix = InterpFJitterMatrix[:,1:upperindex]
+
 			self.InterpolatedTime  = InterpolatedTime
 
 
 			Fdata =  np.fft.rfft(self.ProfileData, axis=1)[:,1:upperindex]
 
-			self.NFBasis = upperindex - 1
 			self.ProfileFData = np.zeros([self.NToAs, 2*self.NFBasis])
 			self.ProfileFData[:, :self.NFBasis] = np.real(Fdata)
 			self.ProfileFData[:, self.NFBasis:] = np.imag(Fdata)
@@ -1288,154 +1409,6 @@ class Likelihood(object):
 
 
 
-
-	def PreComputeShapelets(self, interpTime = 1, MeanBeta = 0.1, ToPickle = False, FromPickle = False):
-
-
-		print("Calculating Shapelet Interpolation Matrix : ", interpTime, MeanBeta);
-
-		'''
-		/////////////////////////////////////////////////////////////////////////////////////////////  
-		/////////////////////////Profile Params//////////////////////////////////////////////////////
-		/////////////////////////////////////////////////////////////////////////////////////////////
-		'''
-
-		InterpBins = np.max(self.Nbins)
-
-		numtointerpolate = np.int(self.ReferencePeriod/InterpBins/interpTime/10.0**-9)+1
-		InterpolatedTime = self.ReferencePeriod/InterpBins/numtointerpolate
-		self.InterpolatedTime  = InterpolatedTime	
-
-
-
-		lenRFFT = len(np.fft.rfft(np.ones(InterpBins)))
-		MeanBeta = MeanBeta*self.ReferencePeriod
-
-
-		interpStep = self.ReferencePeriod/InterpBins/numtointerpolate
-
-
-		if(FromPickle == False):
-
-
-	                InterpFShapeMatrix = np.zeros([numtointerpolate, lenRFFT, self.MaxCoeff])+0j
-	                InterpFJitterMatrix = np.zeros([numtointerpolate,lenRFFT, self.MaxCoeff])+0j
-			self.InterpBasis = np.zeros([numtointerpolate, InterpBins,self.MaxCoeff])
-	                self.InterpJitterMatrix = np.zeros([numtointerpolate,InterpBins, self.MaxCoeff])
-
-			for t in range(numtointerpolate):
-
-				self.update_progress(np.float64(t)/numtointerpolate)
-
-				binpos = t*interpStep
-
-				samplerate = self.ReferencePeriod/InterpBins
-				x = np.linspace(binpos, binpos+samplerate*(InterpBins-1), InterpBins)
-				x = ( x + self.ReferencePeriod/2) % (self.ReferencePeriod ) - self.ReferencePeriod/2
-				x=x/MeanBeta
-				ExVec = np.exp(-0.5*(x)**2)
-
-
-				hermiteMatrix = np.zeros([self.MaxCoeff+1,InterpBins])
-				JitterMatrix = np.zeros([InterpBins,self.MaxCoeff])
-
-				self.TNothpl(self.MaxCoeff+1, x, hermiteMatrix)
-
-				hermiteMatrix *= ExVec
-
-				#for i in range(self.MaxCoeff+1):
-
-					#hermiteMatrix[i] /= np.std(hermiteMatrix[i])
-
-				ScaleFactors = self.Bconst(MeanBeta, np.arange(self.MaxCoeff+1))
-				for i in range(self.MaxCoeff+1):
-						hermiteMatrix[i] *= ScaleFactors[i]
-
-
-				hermiteMatrix = hermiteMatrix.T
-
-				JitterMatrix[:,0] = (1.0/np.sqrt(2.0))*(-1.0*hermiteMatrix[:,1])/MeanBeta
-				for i in range(1,self.MaxCoeff):
-					JitterMatrix[:,i] = (1.0/np.sqrt(2.0))*(np.sqrt(1.0*i)*hermiteMatrix[:,i-1] - np.sqrt(1.0*(i+1))*hermiteMatrix[:,i+1])/MeanBeta
-
-
-
-				self.InterpBasis[t]  = np.copy(hermiteMatrix[:,:self.MaxCoeff])
-				self.InterpJitterMatrix[t] = np.copy(JitterMatrix)
-
-				InterpFShapeMatrix[t]  = np.copy(np.fft.rfft(hermiteMatrix[:,:self.MaxCoeff], axis=0))
-				InterpFJitterMatrix[t] = np.copy(np.fft.rfft(JitterMatrix, axis=0))
-
-
-			threshold = 10.0**-10
-			upperindex=1
-			while(np.max(np.abs(InterpFShapeMatrix[0,upperindex:,:])) > threshold):
-				upperindex += 5
-				if(upperindex >= lenRFFT):
-					upperindex = lenRFFT-1
-					break
-				print "upper index is:", upperindex,np.max(np.abs(InterpFShapeMatrix[0,upperindex:,:]))
-			#InterpShapeMatrix = np.array(InterpShapeMatrix)
-			#InterpJitterMatrix = np.array(InterpJitterMatrix)
-			print("\nFinished Computing Interpolated Profiles")
-
-
-			self.InterpFBasis = InterpFShapeMatrix[:,1:upperindex,:]
-			self.InterpFJitterMatrix = InterpFJitterMatrix[:,1:upperindex,:]
-			self.InterpolatedTime  = InterpolatedTime
-
-			'''
-
-			x = np.linspace(0, 1-1.0/10240, 1024*10)
-			x = ( x + 1.0/2) % (1.0) - 1.0/2
-			bigHM = np.zeros([self.MaxCoeff+1, 1024*10])
-			self.TNothpl(self.MaxCoeff+1, x/self.MeanBeta, bigHM)
-			bigHM=(bigHM*np.exp(-0.5*(x/self.MeanBeta)**2)).T
-			rfftbigHM=np.fft.rfft(bigHM, axis=0)
-
-
-			x = np.linspace(1.0/10240, 1, 1024*10)
-			x = ( x + 1.0/2) % (1.0) - 1.0/2
-			bigHM2 = np.zeros([self.MaxCoeff+1, 1024*10])
-			self.TNothpl(self.MaxCoeff+1, x/self.MeanBeta, bigHM2)
-			bigHM2=(bigHM2*np.exp(-0.5*(x/self.MeanBeta)**2)).T
-			rfftbigHM2=np.fft.rfft(bigHM2, axis=0)
-
-			rfftfreqs2=np.linspace(0,5*1024,5*1024+1)
-			HM = np.zeros([self.MaxCoeff+1, len(2*np.pi*rfftfreqs)])
-			self.TNothpl(self.MaxCoeff+1, 2*np.pi*rfftfreqs*self.MeanBeta, HM)
-			HME=HM*np.exp(-0.5*(2*np.pi*rfftfreqs*self.MeanBeta)**2)
-
-			rfftfreqs=np.linspace(0,0.5*1024,0.5*1024+1)
-			SmallHM = np.zeros([self.MaxCoeff+1, len(2*np.pi*rfftfreqs)])
-			self.TNothpl(self.MaxCoeff+1, 2*np.pi*rfftfreqs*self.MeanBeta, SmallHM)
-			SmallHME=SmallHM*np.exp(-0.5*(2*np.pi*rfftfreqs*self.MeanBeta)**2)
-			rollVec1 = np.exp(2*np.pi*0.1*rfftfreqs/1024*1j)
-						'''
-			Fdata =  np.fft.rfft(self.ProfileData, axis=1)[:,1:upperindex]
-
-			self.NFBasis = upperindex - 1
-			self.ProfileFData = np.zeros([self.NToAs, 2*self.NFBasis])
-			self.ProfileFData[:, :self.NFBasis] = np.real(Fdata)
-			self.ProfileFData[:, self.NFBasis:] = np.imag(Fdata)
-		
-                        if(ToPickle == True):
-                                print "\nPickling Basis"
-                                output = open(self.root+'-TScrunch.Basis.pickle', 'wb')
-                                pickle.dump(self.ProfileFData, output)
-                                pickle.dump(self.InterpFJitterMatrix, output)
-				pickle.dump(self.InterpFBasis, output)
-                                output.close()
-
-                if(FromPickle == True):
-                        print "Loading Basis from Pickled Data"
-                        pick = open(self.root+'-TScrunch.Basis.pickle', 'rb')
-                        self.ProfileFData = pickle.load(pick)
-                        self.InterpFJitterMatrix  = pickle.load(pick)
-			self.InterpFBasis = pickle.load(pick)
-                        pick.close()
-			self.NFBasis = np.shape(self.InterpFBasis)[1]
-			print "Loaded NFBasis: ", self.NFBasis
 
 
 
@@ -1525,26 +1498,31 @@ class Likelihood(object):
 
 		s = np.sum([np.dot(self.InterpFBasis[InterpBins], ShapeAmps[:,i])*(((self.psr.freqs - self.EvoRefFreq)/1000.0)**i).reshape(self.NToAs,1) for i in range(self.EvoNPoly+1)], axis=0)
 
-
 		for i in range(self.NToAs):
 
 			rfftfreqs=np.linspace(1,self.NFBasis,self.NFBasis)/self.Nbins[i]
 
 			pnoise = self.ProfileInfo[i,6]*np.sqrt(self.Nbins[i])/np.sqrt(2)
 
-			rollVec = np.exp(2*np.pi*RollBins[i]*rfftfreqs*1j)
-			rollS1 = s[i]*rollVec
+			RealRoll = np.cos(-2*np.pi*RollBins[i]*rfftfreqs)
+			ImagRoll = np.sin(-2*np.pi*RollBins[i]*rfftfreqs)
+
+			RollData = np.zeros(2*self.NFBasis)
+			RollData[:self.NFBasis] = RealRoll*self.ProfileFData[i][:self.NFBasis]-ImagRoll*self.ProfileFData[i][self.NFBasis:]
+			RollData[self.NFBasis:] = ImagRoll*self.ProfileFData[i][:self.NFBasis]+RealRoll*self.ProfileFData[i][self.NFBasis:]
+			
+			
 
 			if(self.NScatterEpochs > 0):
 				ScatterScale = self.psr.ssbfreqs()[i]**4/10.0**(9.0*4.0)
 				STime = (10.0**self.MeanScatter)/ScatterScale
 				ScatterVec = self.ConvolveExp(rfftfreqs*self.Nbins[i]/self.ReferencePeriod, STime)
 
-				rollS1 *= ScatterVec
+				s[i] *= ScatterVec
 
 			FS = np.zeros(2*self.NFBasis)
-			FS[:self.NFBasis] = np.real(rollS1)
-			FS[self.NFBasis:] = np.imag(rollS1)
+			FS[:self.NFBasis] = s[i][:self.NFBasis]
+			FS[self.NFBasis:] = s[i][self.NFBasis:]
 
 			FS /= np.sqrt(np.dot(FS,FS)/(2*self.NFBasis))
 
@@ -1565,518 +1543,6 @@ class Likelihood(object):
 
 		return loglike
 
-	#@profile
-	def PhaseLike(self, x):
-	    
-
-		pcount = 0
-		phase = x[pcount]*self.ReferencePeriod
-		pcount += 1
-
-		loglike = 0
-
-		stepsize=np.zeros([self.MaxCoeff - 1, self.EvoNPoly+1])
-
-		xS = self.ShiftedBinTimes[:,0]-phase
-
-		xS = ( xS + self.ReferencePeriod/2) % (self.ReferencePeriod ) - self.ReferencePeriod/2
-
-		InterpBins = (xS%(self.ReferencePeriod/self.Nbins[:])/self.InterpolatedTime).astype(int)
-		WBTs = xS-self.InterpolatedTime*InterpBins
-		RollBins=(np.round(WBTs/(self.ReferencePeriod/self.Nbins[:]))).astype(np.int)
-
-
-		SmallS=[np.dot(self.InterpFBasis[InterpBins[i]], np.sum(((self.psr.freqs[i] - self.EvoRefFreq)/1000.0)**np.arange(0,self.EvoNPoly+1)*self.MLShapeCoeff[:self.MaxCoeff], axis=1)) for i in range(len(RollBins))]
-
-		if(self.NScatterEpochs > 0):
-			for i in range(self.NToAs):
-				ScatterScale = (self.psr.freqs[i]*10.0**6)**4/10.0**(9.0*4.0)
-				STime = 10.0**self.MeanScatter/ScatterScale
-				ScatterVec = self.ConvolveExp(np.linspace(1, self.NFBasis, self.NFBasis)/self.ReferencePeriod, STime)
-				SmallS[i] *= ScatterVec
-
-		s=np.zeros([self.NToAs, self.NFBasis+1])+0j
-		s[:,1:] = SmallS
-
-		s=np.fft.irfft(s, n=self.Nbins[0], axis=1)
-		s=[np.roll(s[i], -RollBins[i]) for i in range(len(RollBins))]
-
-
-		#Rescale
-		s = [s[i]/(np.dot(s[i],s[i])/self.Nbins[i]) for i in range(self.NToAs)]
-
-		for i in range(self.NToAs):
-
-			#Make design matrix.  Two components: baseline and profile shape.
-
-			M=np.ones([2,self.Nbins[i]])
-			M[1] = s[i]
-
-
-			pnoise = self.ProfileInfo[i][6]
-
-			MNM = np.dot(M, M.T)      
-			MNM /= (pnoise*pnoise)
-
-			#Invert design matrix. 2x2 so just do it numerically
-
-
-			detMNM = MNM[0][0]*MNM[1][1] - MNM[1][0]*MNM[0][1]
-			InvMNM = np.zeros([2,2])
-			InvMNM[0][0] = MNM[1][1]/detMNM
-			InvMNM[1][1] = MNM[0][0]/detMNM
-			InvMNM[0][1] = -1*MNM[0][1]/detMNM
-			InvMNM[1][0] = -1*MNM[1][0]/detMNM
-
-			logdetMNM = np.log(detMNM)
-			    
-			#Now get dNM and solve for likelihood.
-			    
-			    
-			dNM = np.dot(self.ProfileData[i], M.T)/(pnoise*pnoise)
-
-
-			dNMMNM = np.dot(dNM.T, InvMNM)
-			MarginLike = np.dot(dNMMNM, dNM)
-
-			profilelike = -0.5*(logdetMNM - MarginLike)
-			loglike += profilelike
-
-
-			if(self.getShapeletStepSize == True):
-				amp = dNMMNM[1]
-				for j in range(self.MaxCoeff - 1):
-					EvoFac = (((self.psr.freqs[i]-self.EvoRefFreq)/1000)**np.arange(0,self.EvoNPoly+1))**2
-					BVec = amp*np.roll(self.InterpBasis[InterpBins[i]][:,j], -RollBins[i])
-					stepsize[j] += EvoFac*np.dot(BVec, BVec)/self.ProfileInfo[i][6]/self.ProfileInfo[i][6]
-
-
-			if(self.doplot == True):
-			    baseline=dNMMNM[0]
-			    amp = dNMMNM[1]
-			    noise = np.std(self.ProfileData[i] - baseline - amp*s[i])
-			    print i, amp, baseline, noise
-			    plt.plot(np.linspace(0,1,self.Nbins[i]), self.ProfileData[i])
-			    plt.plot(np.linspace(0,1,self.Nbins[i]),baseline+s[i]*amp)
-			    plt.show()
-			    plt.plot(np.linspace(0,1,self.Nbins[i]),self.ProfileData[i]-(baseline+s[i]*amp))
-			    plt.show()
-
-		if(self.getShapeletStepSize == True):
-			for j in range(self.MaxCoeff - 1):
-				print "step size ", j,  stepsize[j], 1.0/np.sqrt(stepsize[j])
-			return 1.0/np.sqrt(stepsize)
-	
-		return loglike
-
-
-	#@profile
-	#Shifted=np.fft.irfft(np.fft.rfft(np.float64(ZeroExVec))*np.exp(1*2*np.pi*231*rfftfreqs*1j))
-
-	def MarginLogLike(self, x):
-	    
-
-
-		pcount = 0
-		phase=x[0]*self.ReferencePeriod#self.MeanPhase*self.ReferencePeriod
-		phasePrior = -0.5*(phase-self.MeanPhase)*(phase-self.MeanPhase)/self.PhasePrior/self.PhasePrior
-	
-		pcount += 1
-
-		NCoeff = self.MaxCoeff-1
-		#pcount += 1
-
-
-		ShapeAmps=np.zeros([self.MaxCoeff, self.EvoNPoly+1])
-		ShapeAmps[0][0] = 1
-		ShapeAmps[1:]=x[pcount:pcount+(self.MaxCoeff-1)*(self.EvoNPoly+1)].reshape([(self.MaxCoeff-1),(self.EvoNPoly+1)])
-
-
-		pcount += (self.MaxCoeff-1)*(self.EvoNPoly+1)
-
-		TimingParameters=x[pcount:pcount+self.numTime]
-		pcount += self.numTime
-
-		loglike = 0
-
-		TimeSignal = np.dot(self.designMatrix, TimingParameters)
-
-		xS = self.ShiftedBinTimes[:,0]-phase
-
-		if(self.numTime>0):
-			xS -= TimeSignal
-
-		xS = ( xS + self.ReferencePeriod/2) % (self.ReferencePeriod ) - self.ReferencePeriod/2
-
-		InterpBins = (xS%(self.ReferencePeriod/self.Nbins[:])/self.InterpolatedTime).astype(int)
-		WBTs = xS-self.InterpolatedTime*InterpBins
-		RollBins=(np.round(WBTs/(self.ReferencePeriod/self.Nbins[:]))).astype(np.int)
-
-
-
-
-
-		s=[np.roll(np.dot(self.InterpBasis[InterpBins[i]][:,:NCoeff+1], np.sum(((self.psr.freqs[i] - self.EvoRefFreq)/1000.0)**np.arange(0,self.EvoNPoly+1)*ShapeAmps, axis=1)), -RollBins[i]) for i in range(len(RollBins))]
-		s = [s[i] - np.sum(s[i])/self.Nbins[i] for i in range(self.NToAs)]	
-		s = [s[i]/(np.dot(s[i],s[i])/self.Nbins[i]) for i in range(self.NToAs)]
-
-
-
-
-		s=[np.dot(self.InterpFBasis[InterpBins[i]], np.sum(((self.psr.freqs[i] - self.EvoRefFreq)/1000.0)**np.arange(0,self.EvoNPoly+1)*self.MLShapeCoeff, axis=1)) for i in range(len(RollBins))]
-		for i in range(len(RollBins)):
-			s[i][0]=0
-		s=np.fft.irfft(s, n=self.Nbins[0], axis=1)
-		s=[np.roll(s[i], -RollBins[i]) for i in range(len(RollBins))]
-
-
-		#Rescale
-		s = [s[i]/(np.dot(s[i],s[i])/self.Nbins[i]) for i in range(self.NToAs)]
-
-
-
-
-
-		for i in range(self.NToAs):
-
-
-			'''Make design matrix.  Two components: baseline and profile shape.'''
-
-			M=np.ones([2,self.Nbins[i]])
-			M[1] = s[i]
-
-
-			pnoise = self.ProfileInfo[i][6]
-
-			MNM = np.dot(M, M.T)      
-			MNM /= (pnoise*pnoise)
-
-			'''Invert design matrix. 2x2 so just do it numerically'''
-
-
-			detMNM = MNM[0][0]*MNM[1][1] - MNM[1][0]*MNM[0][1]
-			InvMNM = np.zeros([2,2])
-			InvMNM[0][0] = MNM[1][1]/detMNM
-			InvMNM[1][1] = MNM[0][0]/detMNM
-			InvMNM[0][1] = -1*MNM[0][1]/detMNM
-			InvMNM[1][0] = -1*MNM[1][0]/detMNM
-
-			logdetMNM = np.log(detMNM)
-			    
-			'''Now get dNM and solve for likelihood.'''
-			    
-			    
-			dNM = np.dot(self.ProfileData[i], M.T)/(pnoise*pnoise)
-
-
-			dNMMNM = np.dot(dNM.T, InvMNM)
-			MarginLike = np.dot(dNMMNM, dNM)
-
-			profilelike = -0.5*(logdetMNM - MarginLike)
-			loglike += profilelike
-
-			if(self.doplot == True):
-			    baseline=dNMMNM[0]
-			    amp = dNMMNM[1]
-			    noise = np.std(self.ProfileData[i] - baseline - amp*s)
-			    print i, amp, baseline, noise
-			    plt.plot(np.linspace(0,1,self.Nbins[i]), self.ProfileData[i])
-			    plt.plot(np.linspace(0,1,self.Nbins[i]),baseline+s[i]*amp)
-			    plt.show()
-			    plt.plot(np.linspace(0,1,self.Nbins[i]),self.ProfileData[i]-(baseline+s[i]*amp))
-			    plt.show()
-
-		return loglike+phasePrior
-
-	#@profile	
-	def FFTMarginLogLike(self, x):
-	    
-
-
-		pcount = 0
-		phase=x[0]*self.ReferencePeriod
-		phasePrior = -0.5*(phase-self.MeanPhase)*(phase-self.MeanPhase)/self.PhasePrior/self.PhasePrior
-
-		pcount += 1
-
-		NCoeff = self.TotCoeff-1
-		#pcount += 1
-
-
-		ShapeAmps=np.zeros([self.TotCoeff, self.EvoNPoly+1])
-		ShapeAmps[0][0] = 1
-		ShapeAmps[1:]=x[pcount:pcount + NCoeff*(self.EvoNPoly+1)].reshape([NCoeff,(self.EvoNPoly+1)])
-
-
-		pcount += NCoeff*(self.EvoNPoly+1)
-
-		TimingParameters=x[pcount:pcount+self.numTime]
-		pcount += self.numTime
-
-		ScatteringParameters = 10.0**x[pcount:pcount+self.NScatterEpochs]
-		pcount += self.NScatterEpochs
-
-
-		loglike = 0
-
-		TimeSignal = np.dot(self.designMatrix, TimingParameters)
-
-		xS = self.ShiftedBinTimes[:,0]-phase
-
-		if(self.numTime>0):
-			xS -= TimeSignal
-
-		xS = ( xS + self.ReferencePeriod/2) % (self.ReferencePeriod ) - self.ReferencePeriod/2
-
-		InterpBins = (xS%(self.ReferencePeriod/self.Nbins[:])/self.InterpolatedTime).astype(int)
-		WBTs = xS-self.InterpolatedTime*InterpBins
-		RollBins=(np.round(WBTs/(self.ReferencePeriod/self.Nbins[:]))).astype(np.int)
-
-
-		#s = [np.dot(self.InterpFBasis[InterpBins[i]], np.sum(((self.psr.freqs[i] - self.EvoRefFreq)/1000.0)**np.arange(0,self.EvoNPoly+1)*ShapeAmps, axis=1)) for i in range(len(RollBins))]
-		s = np.sum([np.dot(self.InterpFBasis[InterpBins], ShapeAmps[:,i])*(((self.psr.freqs - self.EvoRefFreq)/1000.0)**i).reshape(self.NToAs,1) for i in range(self.EvoNPoly+1)], axis=0)
-
-		Res=[]
-		Data=[]
-		Model=[]
-		for i in range(self.NToAs):
-
-			rfftfreqs=np.linspace(1,self.NFBasis,self.NFBasis)/self.Nbins[i]
-
-			pnoise = self.ProfileInfo[i,6]*np.sqrt(self.Nbins[i])/np.sqrt(2)
-
-			rollVec = np.exp(2*np.pi*RollBins[i]*rfftfreqs*1j)
-			rollS1 = s[i]*rollVec
-
-			if(self.NScatterEpochs > 0):
-				ScatterScale = self.psr.ssbfreqs()[i]**4/10.0**(9.0*4.0)
-				STime = np.sum(ScatteringParameters[self.ScatterInfo[i]])/ScatterScale
-				ScatterVec = self.ConvolveExp(rfftfreqs*self.Nbins[i]/self.ReferencePeriod, STime)
-
-				rollS1 *= ScatterVec
-
-			FS = np.zeros(2*self.NFBasis)
-			FS[:self.NFBasis] = np.real(rollS1)
-			FS[self.NFBasis:] = np.imag(rollS1)
-
-			FS /= np.sqrt(np.dot(FS,FS)/(2*self.NFBasis))
-
-			MNM = np.dot(FS, FS)/(pnoise*pnoise)
-			detMNM = MNM
-			logdetMNM = np.log(detMNM)
-
-			InvMNM = 1.0/MNM
-
-			dNM = np.dot(self.ProfileFData[i], FS)/(pnoise*pnoise)
-			dNMMNM = dNM*InvMNM
-
-			MarginLike = dNMMNM*dNM
-
-			profilelike = -0.5*(logdetMNM - MarginLike)
-			loglike += profilelike     
-
-
-			if(self.doplot == True):
-
-			    bm = np.zeros(len(np.fft.rfft(np.zeros(self.Nbins[i])))) + 0j
-			    sr = FS[:self.NFBasis]*dNMMNM
-			    si = FS[self.NFBasis:]*dNMMNM
-			    bm[1:self.NFBasis+1] = sr + 1j*si
-			    bmfft = np.fft.irfft(bm)
-
-			    bd = np.zeros(len(np.fft.rfft(np.zeros(self.Nbins[i])))) + 0j
-			    dr = self.ProfileFData[i][:self.NFBasis]
-			    di = self.ProfileFData[i][self.NFBasis:]
-			    bd[1:self.NFBasis+1] = dr + 1j*di
-			    bdfft = np.fft.irfft(bd)
-			    Res.append( np.roll(np.roll((bmfft-bdfft)/self.ProfileInfo[i,6], RollBins[i]), self.Nbins[i]/2))
-			    Data.append(np.roll(np.roll(bdfft, RollBins[i]), self.Nbins[i]/2))
-			    Model.append(np.roll(np.roll(bmfft, RollBins[i]), self.Nbins[i]/2))
-
-		if(self.doplot == True):
-			return Res, Data, Model 
-
-		return loglike+phasePrior
-
-	def calculateHessian(self,x):
-
-		pcount = 0
-		phase=x[0]*self.ReferencePeriod
-		pcount += 1
-
-		NCoeff = np.sum(self.MaxCoeff)-1
-		#pcount += 1
-
-
-		ShapeAmps=np.zeros([np.sum(self.MaxCoeff), self.EvoNPoly+1])
-		ShapeAmps[0][0] = 1
-		ShapeAmps[1:]=x[pcount:pcount+(NCoeff)*(self.EvoNPoly+1)].reshape([NCoeff,(self.EvoNPoly+1)])
-
-
-		pcount += NCoeff*(self.EvoNPoly+1)
-
-		TimingParameters=x[pcount:pcount+self.numTime]
-		pcount += self.numTime
-
-		loglike = 0
-
-		TimeSignal = np.dot(self.designMatrix, TimingParameters)
-
-		xS = self.ShiftedBinTimes[:,0]-phase
-
-		if(self.numTime>0):
-			xS -= TimeSignal
-
-		xS = ( xS + self.ReferencePeriod/2) % (self.ReferencePeriod ) - self.ReferencePeriod/2
-
-		InterpBins = (xS%(self.ReferencePeriod/self.Nbins[:])/self.InterpolatedTime).astype(int)
-		WBTs = xS-self.InterpolatedTime*InterpBins
-		RollBins=(np.round(WBTs/(self.ReferencePeriod/self.Nbins[:]))).astype(np.int)
-
-
-		#Multiply and shift out the shapelet model
-
-		s=[np.roll(np.dot(self.InterpBasis[InterpBins[i]][:,:NCoeff+1], np.sum(((self.psr.freqs[i] - self.EvoRefFreq)/1000.0)**np.arange(0,self.EvoNPoly+1)*ShapeAmps, axis=1)), -RollBins[i]) for i in range(len(RollBins))]
-
-		j=[np.roll(np.dot(self.InterpJitterMatrix[InterpBins[i]][:,:NCoeff+1], np.sum(((self.psr.freqs[i] - self.EvoRefFreq)/1000.0)**np.arange(0,self.EvoNPoly+1)*ShapeAmps, axis=1)), -RollBins[i]) for i in range(len(RollBins))]
-
-
-		FFTS = np.sum([np.dot(self.InterpFBasis[InterpBins], ShapeAmps[:,i])*(((self.psr.freqs - self.EvoRefFreq)/1000.0)**i).reshape(self.NToAs,1) for i in range(self.EvoNPoly+1)], axis=0)
-		FFTS = [np.exp(2*np.pi*RollBins[i]*(np.linspace(1,self.NFBasis,self.NFBasis)/self.Nbins[i])*1j)*FFTS[i] for i in range(self.NToAs)]
-
-
-		HessSize = self.n_params
-		Hessian = np.zeros([HessSize,HessSize])
-		LinearSize = 1 + (NCoeff)*(self.EvoNPoly+1) + self.numTime
-
-		MLAmps = np.zeros(self.NToAs)
-		for i in range(self.NToAs):
-
-
-			smean = np.sum(s[i])/self.Nbins[i] 
-			s[i] = s[i]-smean
-			j[i] = j[i]-smean
-
-			sstd = np.dot(s[i],s[i])/self.Nbins[i]
-			s[i]=s[i]/np.sqrt(sstd)
-			j[i]=j[i]/np.sqrt(sstd)
-
-			M=np.ones([2,self.Nbins[i]])
-			M[1] = s[i]
-
-
-			pnoise = self.ProfileInfo[i][6]
-
-			MNM = np.dot(M, M.T)      
-			MNM /= (pnoise*pnoise)
-
-
-			detMNM = MNM[0][0]*MNM[1][1] - MNM[1][0]*MNM[0][1]
-			InvMNM = np.zeros([2,2])
-			InvMNM[0][0] = MNM[1][1]/detMNM
-			InvMNM[1][1] = MNM[0][0]/detMNM
-			InvMNM[0][1] = -1*MNM[0][1]/detMNM
-			InvMNM[1][0] = -1*MNM[1][0]/detMNM
-
-
-			    
-			'''Now get dNM and solve for likelihood.'''
-			    
-			    
-			dNM = np.dot(self.ProfileData[i], M.T)/(pnoise*pnoise)
-
-			dNMMNM = np.dot(dNM.T, InvMNM)
-
-			baseline=dNMMNM[0]
-			MLAmp = dNMMNM[1]
-			MLSigma = pnoise
-
-
-			MLAmps[i] = MLAmp
-
-			HessMatrix = np.zeros([LinearSize, self.Nbins[i]])
-
-
-			#Phase First
-			PhaseScale = MLAmp/MLSigma
-
-			pcount = 0
-			HessMatrix[pcount,:] = PhaseScale*j[i]*self.ReferencePeriod
-			pcount += 1
-
-
-			#Hessian for Shapelet parameters
-			fvals = ((self.psr.freqs[i] - self.EvoRefFreq)/1000.0)**np.arange(0,self.EvoNPoly+1)
-
-			for c in range(1, np.sum(self.MaxCoeff)):
-				for p in range(self.EvoNPoly+1):
-					HessMatrix[pcount,:] = fvals[p]*np.roll(self.InterpBasis[InterpBins[i]][:,c], -RollBins[i])*MLAmp/MLSigma
-					pcount += 1
-
-			#Hessian for Timing Model
-
-			for c in range(self.numTime):
-				HessMatrix[pcount,:] = j[i]*PhaseScale*self.designMatrix[i,c]
-				pcount += 1
-
-
-			OneHess = np.dot(HessMatrix, HessMatrix.T)
-			Hessian[:LinearSize, :LinearSize] += OneHess
-		
-
-
-			for c in range(self.NScatterEpochs):
-				if(c in self.ScatterInfo[i]):
-
-					tau = 10.0**x[-self.NScatterEpochs+c]
-					f = np.linspace(1,self.NFBasis,self.NFBasis)/self.ReferencePeriod
-					w = 2.0*np.pi*f
-					ScatterScale = 1.0/(self.psr.ssbfreqs()[i]**4/10.0**(9.0*4.0))
-
-					Conv = self.ConvolveExp(f, tau*ScatterScale)
-
-					ConvVec = np.zeros(2*self.NFBasis)
-					ConvVec[:self.NFBasis] = np.real(Conv)
-					ConvVec[self.NFBasis:] = np.imag(Conv)
-
-
-					PVec = np.zeros(2*self.NFBasis)
-					PVec[:self.NFBasis] = MLAmps[i]*np.real(FFTS[i])
-					PVec[self.NFBasis:] = MLAmps[i]*np.imag(FFTS[i])
-
-					pnoise = self.ProfileInfo[i,6]*np.sqrt(self.Nbins[i])/np.sqrt(2)
-
-					HessDenom = 1.0/(1.0 + tau**2*w**2*ScatterScale**2)**3
-					GradDenom = 1.0/(1.0 + tau**2*w**2*ScatterScale**2)**2
-
-
-					rHess2 = -(4*tau**2*ScatterScale**2*w**2*(tau**2*ScatterScale**2*w**2 - 1)*np.log(10.0)**2)*HessDenom*PVec[:self.NFBasis]
-					rGrad2 = 2*tau**2*ScatterScale**2*w**2*np.log(10.0)*GradDenom*PVec[:self.NFBasis]
-					rFunc2 = (self.ProfileFData[i][:self.NFBasis] - PVec[:self.NFBasis]*np.real(Conv))
-
-					FullRealHess = -1*(rHess2*rFunc2 + rGrad2**2)*(1.0/pnoise**2)
-
-					iHess2 = tau*ScatterScale*w*(1+tau**2*ScatterScale**2*w**2*(tau**2*ScatterScale**2*w**2 - 6))*np.log(10.0)**2*HessDenom*PVec[self.NFBasis:]
-					iGrad2 = -tau*ScatterScale*w*(tau**2*ScatterScale**2*w**2 - 1)*np.log(10.0)*GradDenom*PVec[self.NFBasis:]
-					iFunc2 = (self.ProfileFData[i][self.NFBasis:] - PVec[self.NFBasis:]*np.imag(Conv))
-
-					FullImagHess = -1*(iHess2*iFunc2 + iGrad2**2)*(1.0/pnoise**2)
-				
-
-					profhess = np.zeros(2*self.NFBasis)
-					profhess[:self.NFBasis] = FullRealHess
-					profhess[self.NFBasis:] = FullImagHess
-
-					profgrad = np.zeros(2*self.NFBasis)
-					profgrad[:self.NFBasis] = -0.5*rGrad2*(1.0/pnoise**2)
-					profgrad[self.NFBasis:] = -0.5*iGrad2*(1.0/pnoise**2)
-
-					Hessian[pcount+c,pcount+c] += np.sum(profhess)
-					print c, i, Hessian[pcount+c,pcount+c]
-					pcount += 1
-
-
-		self.hess = Hessian
 
 
 	def calculateFFTHessian(self,x):
@@ -2309,160 +1775,6 @@ class Likelihood(object):
 		self.hess = Hessian
 
 
-	def calculateShapePhaseCov(self,x):
-
-		pcount = 0
-		phase=x[0]*self.ReferencePeriod
-		pcount += 1
-
-		NCoeff = self.MaxCoeff-1
-		#pcount += 1
-
-
-		ShapeAmps=np.zeros([self.MaxCoeff, self.EvoNPoly+1])
-		ShapeAmps[0][0] = 1
-		ShapeAmps[1:]=x[pcount:pcount+(self.MaxCoeff-1)*(self.EvoNPoly+1)].reshape([(self.MaxCoeff-1),(self.EvoNPoly+1)])
-
-
-		pcount += (self.MaxCoeff-1)*(self.EvoNPoly+1)
-
-		TimingParameters=x[pcount:pcount+self.numTime]
-		pcount += self.numTime
-
-		loglike = 0
-
-		TimeSignal = np.dot(self.designMatrix, TimingParameters)
-
-		xS = self.ShiftedBinTimes[:,0]-phase
-
-		if(self.numTime>0):
-			xS -= TimeSignal
-
-		xS = ( xS + self.ReferencePeriod/2) % (self.ReferencePeriod ) - self.ReferencePeriod/2
-
-		InterpBins = (xS%(self.ReferencePeriod/self.Nbins[:])/self.InterpolatedTime).astype(int)
-		WBTs = xS-self.InterpolatedTime*InterpBins
-		RollBins=(np.round(WBTs/(self.ReferencePeriod/self.Nbins[:]))).astype(np.int)
-
-
-		#Multiply and shift out the shapelet model
-
-		s=[np.roll(np.dot(self.InterpBasis[InterpBins[i]][:,:NCoeff+1], np.sum(((self.psr.freqs[i] - self.EvoRefFreq)/1000.0)**np.arange(0,self.EvoNPoly+1)*ShapeAmps, axis=1)), -RollBins[i]) for i in range(len(RollBins))]
-
-		j=[np.roll(np.dot(self.InterpJitterMatrix[InterpBins[i]][:,:NCoeff+1], np.sum(((self.psr.freqs[i] - self.EvoRefFreq)/1000.0)**np.arange(0,self.EvoNPoly+1)*ShapeAmps, axis=1)), -RollBins[i]) for i in range(len(RollBins))]
-
-
-
-		HessSize = 1 +(self.MaxCoeff-1)
-		Hessian = np.zeros([HessSize,HessSize])
-
-		for i in range(self.NToAs):
-
-
-			smean = np.sum(s[i])/self.Nbins[i] 
-			s[i] = s[i]-smean
-			j[i] = j[i]-smean
-
-			sstd = np.dot(s[i],s[i])/self.Nbins[i]
-			s[i]=s[i]/np.sqrt(sstd)
-			j[i]=j[i]/np.sqrt(sstd)
-
-			M=np.ones([2,self.Nbins[i]])
-			M[1] = s[i]
-
-
-			pnoise = self.ProfileInfo[i][6]
-
-			MNM = np.dot(M, M.T)      
-			MNM /= (pnoise*pnoise)
-
-
-			detMNM = MNM[0][0]*MNM[1][1] - MNM[1][0]*MNM[0][1]
-			InvMNM = np.zeros([2,2])
-			InvMNM[0][0] = MNM[1][1]/detMNM
-			InvMNM[1][1] = MNM[0][0]/detMNM
-			InvMNM[0][1] = -1*MNM[0][1]/detMNM
-			InvMNM[1][0] = -1*MNM[1][0]/detMNM
-
-
-			    
-			'''Now get dNM and solve for likelihood.'''
-			    
-			    
-			dNM = np.dot(self.ProfileData[i], M.T)/(pnoise*pnoise)
-
-			dNMMNM = np.dot(dNM.T, InvMNM)
-
-			baseline=dNMMNM[0]
-			MLAmp = dNMMNM[1]
-			MLSigma = pnoise
-
-			HessMatrix = np.zeros([HessSize, self.Nbins[i]])
-
-
-			#Phase First
-			PhaseScale = MLAmp/MLSigma
-
-			pcount = 0
-			HessMatrix[pcount,:] = PhaseScale*j[i]*self.ReferencePeriod
-			pcount += 1
-
-			fvals = ((self.psr.freqs[i] - self.EvoRefFreq)/1000.0)**np.arange(0,self.EvoNPoly+1)
-
-			for c in range(1, self.MaxCoeff):
-				HessMatrix[pcount,:] = fvals[0]*np.roll(self.InterpBasis[InterpBins[i]][:,c], -RollBins[i])*MLAmp/MLSigma
-				pcount += 1
-
-			OneHess = np.dot(HessMatrix, HessMatrix.T)
-			Hessian += OneHess
-
-		self.ShapePhaseCov = Hessian
-	
-
-
-	#Jump proposal for the timing model parameters
-	def TimeJump(self, x, iteration, beta):
-
-
-		q=x.copy()
-		y=np.dot(self.FisherU.T,x[-self.numTime:])
-		ind = np.unique(np.random.randint(0,self.numTime, 1))
-		neff = 1
-		scale = np.random.uniform(1, 50)
-	        sd = 2.4 / np.sqrt(2 * neff) * scale / np.sqrt(beta)
-		ran=np.random.standard_normal(self.numTime)
-		y[ind]=y[ind]+ran[ind]*sd
-
-		newpars=np.dot(self.FisherU, y)
-		q[-self.numTime:]=newpars
-
-	
-		return q, 0
-
-
-
-	'''
-	def drawFromShapeletPrior(parameters, iter, beta):
-	    
-		# post-jump parameters
-		q = parameters.copy()
-
-		# transition probability
-		qxy = 0
-
-		# choose one coefficient at random to prior-draw on
-		ind = np.unique(np.random.randint(1, MaxCoeff, 1))
-
-		# where in your parameter list do the coefficients start?
-		ct = 2
-
-		for ii in ind:
-		    
-		    q[ct+ii] = np.random.uniform(pmin[ct+ii], pmax[ct+ii])
-		    qxy += 0
-	    
-		return q, qxy
-	'''
 
 	def ConvolveExp(self, f, tau, returngrad=False):
 
@@ -2609,3 +1921,625 @@ class Likelihood(object):
 		#cbar2 = plt.colorbar(im2, cax=cax2, ticks=MultipleLocator(0.2), format="%.2f")
 
 		plt.show()
+
+
+	def GHSGPULike(self, ndim, x, like, g):
+
+		####################Cublas Parameters########################################
+
+
+		alpha = np.float64(1.0)
+		beta = np.float64(0.0)
+
+
+		####################Copy Parameter Vector#################################
+
+		params = copy.copy(np.ctypeslib.as_array(x, shape=(ndim[0],)))
+		
+		
+		#Send relevant parameters to physical coordinates for likelihood
+		
+		DenseParams = params[2*self.NToAs:]
+		PhysParams = np.dot(self.EigM, DenseParams)
+		params[2*self.NToAs:] = PhysParams
+		#print("Phys Params: ", PhysParams)
+
+		grad = np.zeros(ndim[0])
+
+		
+		####################Get Parameters########################################
+				
+
+		
+		pcount = 0
+
+		ProfileAmps = params[pcount:pcount+self.NToAs]
+		pcount += self.NToAs
+
+		ProfileNoise = params[pcount:pcount+self.NToAs]*params[pcount:pcount+self.NToAs]
+		pcount += self.NToAs
+
+		gpu_Amps = gpuarray.to_gpu(np.float64(ProfileAmps))
+		gpu_Noise = gpuarray.to_gpu(np.float64(ProfileNoise)) 
+
+		Phase = params[pcount]
+		phasePrior = 0.5*(Phase-self.MeanPhase)*(Phase-self.MeanPhase)/self.PhasePrior/self.PhasePrior
+		phasePriorGrad = (Phase-self.MeanPhase)/self.PhasePrior/self.PhasePrior
+		pcount += 1
+
+		TimingParameters = params[pcount:pcount+self.numTime]
+		pcount += self.numTime
+
+		NCoeff = self.TotCoeff-1
+
+		ShapeAmps=np.zeros([self.TotCoeff, self.EvoNPoly+1])
+		ShapeAmps[0][0] = 1
+		ShapeAmps[1:]=params[pcount:pcount + NCoeff*(self.EvoNPoly+1)].reshape([NCoeff,(self.EvoNPoly+1)])
+
+		ShapeAmps_GPU = gpuarray.to_gpu(ShapeAmps)
+
+		pcount += NCoeff*(self.EvoNPoly+1)
+
+		if(self.numTime > 0):
+			TimingParameters_GPU = gpuarray.to_gpu(np.float64(TimingParameters))
+			cublas.cublasDgemv(self.CUhandle, 't',  self.numTime, self.NToAs, alpha, self.DesignMatrix_GPU.gpudata, self.numTime, TimingParameters_GPU.gpudata, 1, beta, self.TimeSignal_GPU.gpudata, 1)
+
+
+		####################Calculate Profile Amplitudes########################################
+
+		block_size = 128
+		grid_size = int(np.ceil(self.TotCoeff*self.NToAs*1.0/block_size))
+		self.GPUPrepLikelihood(self.ProfAmps_GPU, ShapeAmps_GPU, np.int32(self.NToAs), np.int32(self.TotCoeff), grid=(grid_size,1), block=(block_size,1,1))
+
+
+		####################Calculate Phase Offsets########################################
+
+
+		block_size = 128
+		grid_size = int(np.ceil(self.NToAs*1.0/block_size))
+		self.GPUBinTimes(self.gpu_ShiftedBinTimes, self.gpu_NBins, np.float64(Phase*self.ReferencePeriod), self.TimeSignal_GPU, np.float64(self.ReferencePeriod), np.float64(self.InterpolatedTime), self.gpu_xS, self.gpu_InterpBins, self.gpu_WBTs, self.gpu_RollBins, self.InterpPointers_GPU, self.i_arr_gpu, self.InterpJPointers_GPU, self.JPointers_gpu, np.int32(self.NToAs),  grid=(grid_size,1), block=(block_size,1,1))
+
+
+		####################GPU Batch submit DGEMM for profile and jitter########################################
+		
+		#if we have M = (n x l x m) and N = (n x m x k), MN = O = (n x l x k) the interface to gemmbatched is:
+		#cublas.cublasDgemmBatched(h, 'n','n', k, l, m, alpha, MatrixN, k, MatrixM, m, beta, MatrixO, k, n)
+
+
+
+
+		cublas.cublasDgemmBatched(self.CUhandle, 'n','n', 1, 2*self.NFBasis, self.TotCoeff, alpha, self.ProfAmps_Pointer.gpudata, 1, self.i_arr_gpu.gpudata, self.TotCoeff, beta, self.Signal_Pointer.gpudata, 1, self.NToAs)
+
+		cublas.cublasDgemmBatched(self.CUhandle, 'n','n', 1, 2*self.NFBasis, self.TotCoeff, alpha, self.ProfAmps_Pointer.gpudata, 1, self.JPointers_gpu.gpudata, self.TotCoeff, beta, self.JSignal_Pointer.gpudata, 1, self.NToAs)
+
+		####################Rotate Data########################################
+
+		block_size = 128
+		grid_size = int(np.ceil(self.NToAs*self.NFBasis*1.0/block_size))
+		Step = np.int32(self.NToAs*self.NFBasis)
+
+		self.GPURotateData(self.gpu_Data,  self.gpu_Freqs, self.gpu_RollBins, self.gpu_ToAIndex, self.gpu_RolledData, Step, grid=(grid_size,1), block=(block_size,1,1))
+
+
+
+		####################Compute Chisq########################################
+
+		TotBins = np.int32(2*self.NToAs*self.NFBasis)
+		grid_size = int(np.ceil(self.NToAs*self.NFBasis*2.0/block_size))	
+
+
+		self.GPUGetRes(self.gpu_ResVec, self.gpu_NResVec, self.gpu_RolledData, self.Signal_GPU, gpu_Amps, gpu_Noise, self.gpu_ToAIndex, self.gpu_SignalIndex, TotBins, grid=(grid_size,1), block=(block_size,1,1))
+
+		cublas.cublasDgemmBatched(self.CUhandle, 'n','n', 1, 1, 2*self.NFBasis, alpha, self.ResVec_pointer.gpudata, 1, self.NResVec_pointer.gpudata, 2*self.NFBasis, beta, self.Chisqs_Pointer.gpudata, 1, self.NToAs)
+
+		ChisqVec = self.Chisqs_GPU.get()[:,0,0]
+		gpu_Chisq=np.sum(ChisqVec)
+		like[0] = 0.5*gpu_Chisq + 0.5*2*self.NFBasis*np.sum(np.log(ProfileNoise))
+
+
+		####################Calculate Gradients for amplitude and noise levels########################################
+
+		cublas.cublasDgemmBatched(self.CUhandle, 'n','n', 1, 1, 2*self.NFBasis, alpha, self.Signal_Pointer.gpudata, 1, self.NResVec_pointer.gpudata, 2*self.NFBasis, beta, self.AmpGrads_Pointer.gpudata, 1, self.NToAs)
+		grad[:self.NToAs] = -1*self.AmpGrads_GPU.get()[:,0,0]
+
+
+		grad[self.NToAs:2*self.NToAs] = (-ChisqVec+2*self.NFBasis)/np.sqrt(ProfileNoise)
+
+		pcount = 2*self.NToAs
+
+
+		####################Calculate Gradient for Phase Offset########################################
+
+			
+		cublas.cublasDgemmBatched(self.CUhandle, 'n','n', 1, 1, 2*self.NFBasis, alpha, self.JSignal_Pointer.gpudata, 1, self.NResVec_pointer.gpudata, 2*self.NFBasis, beta, self.JitterGrads_Pointer.gpudata, 1, self.NToAs)
+
+		JGradVec = self.JitterGrads_GPU.get()[:,0,0]*ProfileAmps
+
+		grad[pcount] = np.sum(JGradVec*self.ReferencePeriod)
+		pcount += 1
+		
+		
+		####################Calculate Gradient for Timing Model########################################
+		
+		
+		TimeGrad = np.dot(JGradVec, self.designMatrix)
+		grad[pcount:pcount+self.numTime] = TimeGrad
+		pcount += self.numTime
+
+			
+		####################Calculate Gradient for Profile and Evolution########################################
+		
+
+		cublas.cublasDgemmBatched(self.CUhandle, 'n','n', self.TotCoeff, 1, 2*self.NFBasis, alpha, self.i_arr_gpu.gpudata, self.TotCoeff, self.NResVec_pointer.gpudata, 2*self.NFBasis, beta, self.ShapeGrads_Pointer.gpudata, self.TotCoeff, self.NToAs)
+
+		ShapeGradVec = self.ShapeGrads_GPU.get()[:,0,:]
+
+		for c in range(1, self.TotCoeff):
+			for p in range(self.EvoNPoly+1):
+				OneGrad = -1*np.sum(ShapeGradVec[:,c]*ProfileAmps*self.fvals[p])
+				grad[pcount] = OneGrad
+				pcount += 1
+				
+
+		#Add phase prior to likelihood and gradient
+		like[0] += phasePrior
+		grad[2*self.NToAs] += phasePriorGrad
+		
+					
+		#Send relevant gradients to principle coordinates for sampling
+		
+		DenseGrad = copy.copy(grad[2*self.NToAs:])
+		PrincipleGrad = np.dot(self.EigM.T, DenseGrad)
+		grad[2*self.NToAs:] = PrincipleGrad
+		    
+		#print("like:", like[0], "grad", PrincipleGrad, DenseGrad)
+		for i in range(ndim[0]):
+			g[i] = grad[i]
+
+
+
+		return 
+
+
+	def GHSCPULike(self, ndim, x, like, g):
+		    
+		    
+		params = copy.copy(np.ctypeslib.as_array(x, shape=(ndim[0],)))
+		
+		
+		#Send relevant parameters to physical coordinates for likelihood
+		
+		DenseParams = params[2*self.NToAs:]
+		PhysParams = np.dot(self.EigM, DenseParams)
+		params[2*self.NToAs:] = PhysParams
+		#print("Phys Params: ", PhysParams)
+		
+
+		grad=np.zeros(ndim[0])
+
+		pcount = 0
+
+		ProfileAmps = params[pcount:pcount+self.NToAs]
+		pcount += self.NToAs
+
+		ProfileNoise = params[pcount:pcount+self.NToAs]*params[pcount:pcount+self.NToAs]
+		pcount += self.NToAs
+		
+		Phase = params[pcount]
+		phasePrior = 0.5*(Phase-self.MeanPhase)*(Phase-self.MeanPhase)/self.PhasePrior/self.PhasePrior
+		phasePriorGrad = 1*(Phase-self.MeanPhase)/self.PhasePrior/self.PhasePrior
+		pcount += 1
+		
+		TimingParameters = params[pcount:pcount+self.numTime]
+		pcount += self.numTime
+			
+		NCoeff = self.TotCoeff-1
+		
+		ShapeAmps=np.zeros([self.TotCoeff, self.EvoNPoly+1])
+		ShapeAmps[0][0] = 1
+		ShapeAmps[1:]=params[pcount:pcount + NCoeff*(self.EvoNPoly+1)].reshape([NCoeff,(self.EvoNPoly+1)])
+
+		pcount += NCoeff*(self.EvoNPoly+1)
+		
+		
+		TimeSignal = np.dot(self.designMatrix, TimingParameters)
+		
+
+
+		like[0] = 0
+
+		xS = self.ShiftedBinTimes[:,0] - Phase*self.ReferencePeriod 
+		
+		if(self.numTime>0):
+				xS -= TimeSignal
+				
+		xS = ( xS + self.ReferencePeriod/2) % (self.ReferencePeriod ) - self.ReferencePeriod/2
+
+		InterpBins = (xS%(self.ReferencePeriod/self.Nbins[:])/self.InterpolatedTime).astype(int)
+		WBTs = xS-self.InterpolatedTime*InterpBins
+		RollBins=(np.round(WBTs/(self.ReferencePeriod/self.Nbins[:]))).astype(np.int)
+
+		#ShapeAmps=self.MLShapeCoeff
+
+		s = np.sum([np.dot(self.InterpFBasis[InterpBins], ShapeAmps[:,i])*(((self.psr.freqs - self.EvoRefFreq)/1000.0)**i).reshape(self.NToAs,1) for i in range(self.EvoNPoly+1)], axis=0)
+		j = np.sum([np.dot(self.InterpJBasis[InterpBins], ShapeAmps[:,i])*(((self.psr.freqs - self.EvoRefFreq)/1000.0)**i).reshape(self.NToAs,1) for i in range(self.EvoNPoly+1)], axis=0)
+
+
+		for i in range(self.NToAs):
+
+			rfftfreqs=np.linspace(1,self.NFBasis,self.NFBasis)/self.Nbins[i]
+			RealRoll = np.cos(-2*np.pi*RollBins[i]*rfftfreqs)
+			ImagRoll = np.sin(-2*np.pi*RollBins[i]*rfftfreqs)
+
+		
+			RollData = np.zeros(2*self.NFBasis)
+			RollData[:self.NFBasis] = RealRoll*self.ProfileFData[i][:self.NFBasis]-ImagRoll*self.ProfileFData[i][self.NFBasis:]
+			RollData[self.NFBasis:] = ImagRoll*self.ProfileFData[i][:self.NFBasis]+RealRoll*self.ProfileFData[i][self.NFBasis:]
+			
+			Res = RollData-s[i]*ProfileAmps[i]
+			Chisq = np.dot(Res,Res)/ProfileNoise[i]
+			
+			AmpGrad = -1*np.dot(s[i], Res)/ProfileNoise[i]
+			NoiseGrad = (-Chisq+2*self.NFBasis)/np.sqrt(ProfileNoise[i])
+			
+			proflike = 0.5*Chisq + 0.5*2*self.NFBasis*np.log(ProfileNoise[i])
+
+
+			like[0] += proflike   
+			
+			grad[i] = AmpGrad
+			grad[i+self.NToAs] = NoiseGrad
+			
+			#Gradient for Phase
+			pcount = 2*self.NToAs
+			
+			PhaseGrad = np.dot(Res, j[i])*ProfileAmps[i]/ProfileNoise[i]
+			grad[pcount] += PhaseGrad*self.ReferencePeriod
+			pcount += 1
+			
+			#Gradient for Timing Model
+			TimeGrad = self.designMatrix[i]*PhaseGrad
+			grad[pcount:pcount+self.numTime] += TimeGrad
+			pcount += self.numTime
+			
+			#Gradient for Shape Parameters
+			ShapeGrad = np.dot(self.InterpFBasis[InterpBins[i]].T, Res)/ProfileNoise[i]
+			fvals = ((self.psr.freqs[i] - self.EvoRefFreq)/1000.0)**np.arange(0,self.EvoNPoly+1)
+			
+			for c in range(1, self.TotCoeff):
+				for p in range(self.EvoNPoly+1):
+					grad[pcount] += -fvals[p]*ShapeGrad[c]*ProfileAmps[i]
+					pcount += 1
+
+
+		#Add phase prior to likelihood and gradient
+		like[0] += phasePrior
+		grad[2*self.NToAs] += phasePriorGrad
+		
+		
+		
+		#Send relevant gradients to principle coordinates for sampling
+		
+		DenseGrad = copy.copy(grad[2*self.NToAs:])
+		PrincipleGrad = np.dot(self.EigM.T, DenseGrad)
+		grad[2*self.NToAs:] = PrincipleGrad
+		    
+		#print("like:", like[0], "grad", PrincipleGrad, DenseGrad)
+		for i in range(ndim[0]):
+			g[i] = grad[i]
+
+
+
+		return 
+
+
+	def calculateGHSHessian(self, diagonalGHS = False):
+
+		NCoeff = self.TotCoeff-1
+
+		x0 = np.zeros(self.n_params)
+		cov_diag = np.zeros(self.n_params)
+		
+		DenseParams = 1  + self.numTime + NCoeff*(self.EvoNPoly+1) 
+		
+		hess_dense = np.zeros([DenseParams,DenseParams])
+
+		
+
+		xS = self.ShiftedBinTimes[:,0]-self.MeanPhase*self.ReferencePeriod
+		xS = ( xS + self.ReferencePeriod/2) % (self.ReferencePeriod ) - self.ReferencePeriod/2
+
+		InterpBins = (xS%(self.ReferencePeriod/self.Nbins[:])/self.InterpolatedTime).astype(int)
+		WBTs = xS-self.InterpolatedTime*InterpBins
+		RollBins=(np.round(WBTs/(self.ReferencePeriod/self.Nbins[:]))).astype(np.int)
+
+		ShapeAmps=self.MLShapeCoeff
+
+		s = np.sum([np.dot(self.InterpFBasis[InterpBins], ShapeAmps[:,i])*(((self.psr.freqs - self.EvoRefFreq)/1000.0)**i).reshape(self.NToAs,1) for i in range(self.EvoNPoly+1)], axis=0)
+		
+		j = np.sum([np.dot(self.InterpJBasis[InterpBins], ShapeAmps[:,i])*(((self.psr.freqs - self.EvoRefFreq)/1000.0)**i).reshape(self.NToAs,1) for i in range(self.EvoNPoly+1)], axis=0)
+
+
+		for i in range(self.NToAs):
+
+
+			rfftfreqs=np.linspace(1,self.NFBasis,self.NFBasis)/self.Nbins[i]
+
+			RealRoll = np.cos(-2*np.pi*RollBins[i]*rfftfreqs)
+			ImagRoll = np.sin(-2*np.pi*RollBins[i]*rfftfreqs)
+
+		
+			RollData = np.zeros(2*self.NFBasis)
+			RollData[:self.NFBasis] = RealRoll*self.ProfileFData[i][:self.NFBasis]-ImagRoll*self.ProfileFData[i][self.NFBasis:]
+			RollData[self.NFBasis:] = ImagRoll*self.ProfileFData[i][:self.NFBasis]+RealRoll*self.ProfileFData[i][self.NFBasis:]
+			
+
+			MNM = np.dot(s[i], s[i])
+			dNM = np.dot(RollData, s[i])
+			MLAmp = dNM/MNM
+
+			PSignal = MLAmp*s[i]
+
+			Res=RollData-PSignal
+			MLSigma = np.std(Res)
+
+
+			x0[i] = MLAmp
+			x0[i+self.NToAs] = MLSigma
+
+			RR = np.dot(Res, Res)
+
+			AmpStep =  MNM/(MLSigma*MLSigma)
+			SigmaStep = 3*RR/(MLSigma*MLSigma*MLSigma*MLSigma) - 2.0*self.NFBasis/(MLSigma*MLSigma)
+
+
+			cov_diag[i] = AmpStep
+			cov_diag[i+self.NToAs] = SigmaStep
+			
+			#Make Matrix for Linear Parameters
+			LinearSize = 1  + self.numTime + NCoeff*(self.EvoNPoly+1) 
+
+			HessMatrix = np.zeros([LinearSize, 2*self.NFBasis])
+			
+			#Hessian for Phase parameter
+			
+			PhaseScale = -1*MLAmp/MLSigma
+			LinCount = 0
+			HessMatrix[LinCount,:] = PhaseScale*j[i]*self.ReferencePeriod
+			LinCount += 1
+			
+			#Hessian for Timing Model
+
+			for c in range(self.numTime):
+				HessMatrix[LinCount, :] = j[i]*PhaseScale*self.designMatrix[i,c]
+				LinCount += 1
+				
+
+			#Hessian for Shapelet parameters
+			
+			fvals = ((self.psr.freqs[i] - self.EvoRefFreq)/1000.0)**np.arange(0,self.EvoNPoly+1)
+
+			ShapeBasis = self.InterpFBasis[InterpBins[i]]
+
+			for c in range(1, self.TotCoeff):
+				for p in range(self.EvoNPoly+1):
+					HessMatrix[LinCount, :] = fvals[p]*ShapeBasis[:,c]*MLAmp/MLSigma
+					LinCount += 1
+					
+					
+							
+			OneHess = np.dot(HessMatrix, HessMatrix.T)
+			
+			#add phase prior to hessian
+			OneHess[0,0]  += (1.0/self.PhasePrior/self.PhasePrior)/self.NToAs
+			
+			cov_diag[self.NToAs*2:] += OneHess.diagonal()
+			hess_dense += OneHess
+			
+			
+
+		if(diagonalGHS == False):		
+			#Now do EVD on the dense part of the matrix
+		
+			V, M = sl.eigh(hess_dense)
+		
+			cov_diag[self.NToAs*2:] = V
+		
+		else:
+		
+			hess_dense = np.eye(np.shape(hess_dense)[0])
+			M = copy.copy(hess_dense)
+			
+		
+		#Complete the start point by filling in extra parameters
+
+		pcount = self.NToAs*2
+		
+		x0[pcount] = self.MeanPhase
+		pcount += 1
+		
+		x0[pcount:pcount + self.numTime] = 0
+		pcount += self.numTime
+		
+		if(self.EvoNPoly == 0):
+			x0[pcount:pcount + NCoeff*(self.EvoNPoly+1)] = (self.MLShapeCoeff[1:].T).flatten()[:self.TotCoeff-1]
+		else:
+			x0[pcount:pcount + NCoeff*(self.EvoNPoly+1)] = (self.MLShapeCoeff[1:]).flatten()
+			
+		pcount += NCoeff*(self.EvoNPoly+1)
+			
+				
+		return x0, cov_diag, M, hess_dense
+	
+	def write_ghs_extract_with_logpostval(self, ndim, x, logpostval, grad):
+
+		params = copy.copy(np.ctypeslib.as_array(x, shape=(ndim[0],)))
+		
+		#Send relevant parameters to physical coordinates for likelihood
+		
+		DenseParams = params[2*self.NToAs:]
+		PhysParams = np.dot(self.EigM, DenseParams)
+		params[2*self.NToAs:] = PhysParams
+
+		for i in range(ndim[0]):
+			self.GHSoutfile.write(str(params[i])+" ")
+		
+		self.GHSoutfile.write(str(logpostval[0])+"\n")      
+		
+		return
+
+	def callGHS(self, resume=False, nburn = 100, nsamp = 100, feedback_int = 100, seed = -1,  max_steps = 10, dim_scale_fact = 0.4):
+
+		if(resume == 0):
+			self.GHSoutfile = open(self.root+"extract.dat", "w")
+		else:
+			self.GHSoutfile = open(self.root+"extract.dat", "a")
+
+	
+
+		if(self.useGPU == True and HaveGPUS == True):
+
+
+			print "Initialising arrays on GPU before sampling\n"
+			self.init_gpu_arrays()
+	
+			start = time.time()
+			ghs.run_guided_hmc(self.GHSGPULike,
+					self.write_ghs_extract_with_logpostval,
+					self.n_params, 
+					self.startPoint.astype(np.float64),
+					(1.0/np.sqrt(self.EigV)).astype(np.float64),
+					self.root,
+					dim_scale_fact = dim_scale_fact,
+					max_steps = max_steps,
+					seed = seed,
+					resume = resume,
+					feedback_int = feedback_int,
+					nburn = nburn,
+					nsamp = nsamp,
+					doMaxLike = 0)
+			
+			self.GHSoutfile.close()
+			stop=time.time()
+			print "GHS GPU run time: ", stop-start
+	
+		else:
+			start = time.time()
+                        ghs.run_guided_hmc(self.GHSCPULike,
+                                        self.write_ghs_extract_with_logpostval,
+                                        self.n_params,
+                                        self.startPoint.astype(np.float64),
+                                        (1.0/np.sqrt(self.EigV)).astype(np.float64),
+                                        self.root,
+                                        dim_scale_fact = dim_scale_fact,
+                                        max_steps = max_steps,
+                                        seed = seed,
+                                        resume = resume,
+                                        feedback_int = feedback_int,
+                                        nburn = nburn,
+                                        nsamp = nsamp,
+                                        doMaxLike = 0)
+                 
+                        self.GHSoutfile.close()
+                        stop=time.time()
+                        print "GHS CPU run time: ", stop-start
+
+
+
+	def init_gpu_arrays(self):
+
+
+
+		####################Transfer Matrices to GPU and allocate empty ones########
+
+		self.ProfAmps_GPU = gpuarray.empty((self.NToAs, self.TotCoeff, 1), np.float64)
+		self.ProfAmps_Pointer = self.bptrs(self.ProfAmps_GPU)
+
+		self.InterpFBasis_GPU = gpuarray.to_gpu(self.InterpFBasis)
+		self.Interp_Pointers = np.array([self.InterpFBasis_GPU[i].ptr for i in range(len(self.InterpFBasis))], dtype=np.uint64)
+		self.InterpPointers_GPU = gpuarray.to_gpu(self.Interp_Pointers)
+		self.i_arr_gpu = gpuarray.empty(self.NToAs,  dtype=np.uint64)
+
+		self.InterpJBasis_GPU = gpuarray.to_gpu(self.InterpJBasis)
+		self.InterpJ_Pointers = np.array([self.InterpJBasis_GPU[i].ptr for i in range(len(self.InterpJBasis))], dtype=np.uint64)
+		self.InterpJPointers_GPU = gpuarray.to_gpu(self.InterpJ_Pointers)
+		self.JPointers_gpu = gpuarray.empty(self.NToAs,  dtype=np.uint64)
+
+		self.gpu_ShiftedBinTimes = gpuarray.to_gpu((self.ShiftedBinTimes[:,0]).astype(np.float64))
+		self.gpu_NBins =  gpuarray.to_gpu((self.Nbins).astype(np.int32))
+
+		self.gpu_xS =  gpuarray.empty(self.NToAs, np.float64) 
+		self.gpu_InterpBins =  gpuarray.empty(self.NToAs, np.int32) 
+		self.gpu_WBTs =  gpuarray.empty(self.NToAs, np.float64) 
+		self.gpu_RollBins =  gpuarray.empty(self.NToAs, np.int32) 
+
+
+
+		self.Signal_GPU = gpuarray.empty((self.NToAs, 2*self.NFBasis, 1), np.float64)
+		self.Signal_Pointer = self.bptrs(self.Signal_GPU)
+
+		self.JSignal_GPU = gpuarray.empty((self.NToAs, 2*self.NFBasis, 1), np.float64)
+		self.JSignal_Pointer = self.bptrs(self.JSignal_GPU)
+
+		self.Flat_Data = np.zeros(2*self.NToAs*self.NFBasis)
+		self.Freqs = np.zeros(self.NToAs*self.NFBasis)
+		for i in range(self.NToAs):
+			self.Flat_Data[i*self.NFBasis:(i+1)*self.NFBasis] = self.ProfileFData[i][:self.NFBasis]
+			self.Flat_Data[(self.NToAs + i)*self.NFBasis:(self.NToAs + i+1)*self.NFBasis] = self.ProfileFData[i][self.NFBasis:]
+			
+			self.Freqs[i*self.NFBasis:(i+1)*self.NFBasis] = np.linspace(1,self.NFBasis,self.NFBasis)/self.Nbins[i]
+
+		self.gpu_Data = gpuarray.to_gpu(np.float64(self.Flat_Data))
+		self.gpu_RolledData =  gpuarray.empty(2*self.NToAs*self.NFBasis, np.float64)
+		self.gpu_Freqs = gpuarray.to_gpu(np.float64(self.Freqs)) 
+
+		self.ToA_Index = np.zeros(2*self.NToAs*self.NFBasis).astype(np.int32)
+		self.Signal_Index = np.zeros(2*self.NToAs*self.NFBasis).astype(np.int32)
+
+		for i in range(self.NToAs):
+			self.ToA_Index[i*self.NFBasis:(i+1)*self.NFBasis]=i
+			self.ToA_Index[(self.NToAs + i)*self.NFBasis:(self.NToAs + i+1)*self.NFBasis]=i
+			
+			self.Signal_Index[i*self.NFBasis:(i+1)*self.NFBasis] = np.arange(2*i*self.NFBasis,(2*i+1)*self.NFBasis)
+			self.Signal_Index[(self.NToAs + i)*self.NFBasis:(self.NToAs + i+1)*self.NFBasis] = np.arange((2*i+1)*self.NFBasis,(2*i+2)*self.NFBasis)
+			
+			
+			
+		self.gpu_ToAIndex = gpuarray.to_gpu((self.ToA_Index).astype(np.int32))
+		self.gpu_SignalIndex = gpuarray.to_gpu((self.Signal_Index).astype(np.int32))
+
+		self.gpu_NResVec = gpuarray.empty((self.NToAs, 1, 2*self.NFBasis), np.float64)
+		self.gpu_ResVec = gpuarray.empty((self.NToAs, 2*self.NFBasis, 1), np.float64)
+
+		self.NResVec_pointer = self.bptrs(self.gpu_NResVec)
+		self.ResVec_pointer = self.bptrs(self.gpu_ResVec)
+
+		self.Chisqs_GPU = gpuarray.empty((self.NToAs, 1, 1), np.float64)
+		self.Chisqs_Pointer = self.bptrs(self.Chisqs_GPU)
+
+		self.AmpGrads_GPU = gpuarray.empty((self.NToAs, 1, 1), np.float64)
+		self.AmpGrads_Pointer = self.bptrs(self.AmpGrads_GPU)
+
+		self.JitterGrads_GPU = gpuarray.empty((self.NToAs, 1, 1), np.float64)
+		self.JitterGrads_Pointer = self.bptrs(self.JitterGrads_GPU)
+
+		self.ShapeGrads_GPU = gpuarray.empty((self.NToAs, 1, self.TotCoeff), np.float64)
+		self.ShapeGrads_Pointer = self.bptrs(self.ShapeGrads_GPU)
+
+
+		self.DesignMatrix_GPU = gpuarray.to_gpu(np.float64(self.designMatrix))
+		self.TimeSignal_GPU = gpuarray.zeros(self.NToAs, np.float64)
+
+
+		self.fvals = np.zeros([self.EvoNPoly+1,self.NToAs])
+		for i in range(self.EvoNPoly+1):
+			self.fvals[i] = ((self.psr.freqs - self.EvoRefFreq)/1000.0)**(np.float64(i))
+
+
+	def bptrs(self, a):
+	    """
+	    Pointer array when input represents a batch of matrices.
+	    """
+
+	    return gpuarray.arange(a.ptr,a.ptr+a.shape[0]*a.strides[0],a.strides[0],
+			dtype=cublas.ctypes.c_void_p)
