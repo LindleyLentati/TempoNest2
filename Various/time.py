@@ -1,222 +1,131 @@
-x=x0
-
-SplitBasis = np.zeros([len(lfunc.InterpFBasis), 2*lfunc.NFBasis, lfunc.MaxCoeff])
-SplitBasis[:, :lfunc.NFBasis] = np.real(lfunc.InterpFBasis)
-SplitBasis[:, lfunc.NFBasis:] = np.imag(lfunc.InterpFBasis)
-
-def FFTMarginLogLike(x):
-    
+def PreComputeFFTShapelets(interpTime = 1, MeanBeta = 0.1, ToPickle = False, FromPickle = False):
 
 
-pcount = 0
-phase=x[0]*lfunc.ReferencePeriod#lfunc.MeanPhase*lfunc.ReferencePeriod
-phasePrior = -0.5*(phase-lfunc.MeanPhase)*(phase-lfunc.MeanPhase)/lfunc.PhasePrior/lfunc.PhasePrior
+	print("Calculating Shapelet Interpolation Matrix : ", interpTime, MeanBeta);
 
-pcount += 1
+	'''
+	/////////////////////////////////////////////////////////////////////////////////////////////  
+	/////////////////////////Profile Params//////////////////////////////////////////////////////
+	/////////////////////////////////////////////////////////////////////////////////////////////
+	'''
 
-NCoeff = lfunc.MaxCoeff-1
-#pcount += 1
+	InterpBins = np.max(lfunc.Nbins)
 
-
-ShapeAmps=np.zeros([lfunc.MaxCoeff, lfunc.EvoNPoly+1])
-ShapeAmps[0][0] = 1
-ShapeAmps[1:]=x[pcount:pcount+(lfunc.MaxCoeff-1)*(lfunc.EvoNPoly+1)].reshape([(lfunc.MaxCoeff-1),(lfunc.EvoNPoly+1)])
-
-
-pcount += (lfunc.MaxCoeff-1)*(lfunc.EvoNPoly+1)
-
-TimingParameters=x[pcount:pcount+lfunc.numTime]
-pcount += lfunc.numTime
-
-loglike = 0
-
-TimeSignal = np.dot(lfunc.designMatrix, TimingParameters)
-
-xS = lfunc.ShiftedBinTimes[:,0]-phase
-
-if(lfunc.numTime>0):
-	xS -= TimeSignal
-
-xS = ( xS + lfunc.ReferencePeriod/2) % (lfunc.ReferencePeriod ) - lfunc.ReferencePeriod/2
-
-InterpBins = (xS%(lfunc.ReferencePeriod/lfunc.Nbins[:])/lfunc.InterpolatedTime).astype(int)
-WBTs = xS-lfunc.InterpolatedTime*InterpBins
-RollBins=(np.round(WBTs/(lfunc.ReferencePeriod/lfunc.Nbins[:]))).astype(np.int)
-
-s = [np.dot(ZeroBasis[InterpBins[i]], np.sum(((lfunc.psr.freqs[i] - lfunc.EvoRefFreq)/1000.0)**np.arange(0,lfunc.EvoNPoly+1)*ShapeAmps, axis=1)) for i in range(len(RollBins))]
-#
-
-Is = [np.dot(lfunc.InterpBasis[InterpBins[i]], np.sum(((lfunc.psr.freqs[i] - lfunc.EvoRefFreq)/1000.0)**np.arange(0,lfunc.EvoNPoly+1)*ShapeAmps, axis=1)) for i in range(len(RollBins))]
-s = [np.dot(lfunc.InterpFBasis[InterpBins[i]], np.sum(((lfunc.psr.freqs[i] - lfunc.EvoRefFreq)/1000.0)**np.arange(0,lfunc.EvoNPoly+1)*ShapeAmps, axis=1)) for i in range(len(RollBins))]
-	#s2 = np.sum([np.dot(lfunc.InterpFBasis[InterpBins], ShapeAmps[:,i])*(((lfunc.psr.freqs - lfunc.EvoRefFreq)/1000.0)**i).reshape(lfunc.NToAs,1) for i in range(lfunc.EvoNPoly+1)], axis=0)
-
-Is=[np.roll(Is[i], -RollBins[i]) for i in range(len(RollBins))]
-Is = [Is[i] - np.sum(Is[i])/lfunc.Nbins[i] for i in range(lfunc.NToAs)]	
+	numtointerpolate = np.int(lfunc.ReferencePeriod/InterpBins/interpTime/10.0**-9)+1
+	InterpolatedTime = lfunc.ReferencePeriod/InterpBins/numtointerpolate
+	lfunc.InterpolatedTime  = InterpolatedTime	
 
 
 
-#Rescale
+	lenRFFT = len(np.fft.rfft(np.ones(InterpBins)))
+
+	interpStep = 1.0/InterpBins/numtointerpolate
+
+
+	if(FromPickle == False):
+
+
+                InterpFShapeMatrix = np.zeros([numtointerpolate, lenRFFT, lfunc.MaxCoeff])+0j
+                InterpFJitterMatrix = np.zeros([numtointerpolate,lenRFFT, lfunc.MaxCoeff])+0j
+
+
+		for t in range(numtointerpolate):
+
+			lfunc.update_progress(np.float64(t)/numtointerpolate)
+
+			binpos = t*interpStep
+
+			rfftfreqs=np.linspace(0,0.5*InterpBins,0.5*InterpBins+1)
+			FullMatrix = np.ones([np.sum(lfunc.MaxCoeff+1), len(2*np.pi*rfftfreqs)])
+			FullCompMatrix = np.zeros([np.sum(lfunc.MaxCoeff+1), len(2*np.pi*rfftfreqs)]) + 0j
+			FullJitterMatrix = np.zeros([np.sum(lfunc.MaxCoeff), len(2*np.pi*rfftfreqs)]) + 0j
+
+			ccount = 0
+			for comp in range(lfunc.fitNComps):
 
 
 
-for i in range(lfunc.NToAs):
+				if(lfunc.MaxCoeff > 1):
+					lfunc.TNothpl(lfunc.MaxCoeff+1, 2*np.pi*rfftfreqs*MeanBeta, FullMatrix[ccount:ccount+lfunc.MaxCoeff+1])
+
+				ExVec = np.exp(-0.5*(2*np.pi*rfftfreqs*MeanBeta)**2)
+				FullMatrix[ccount:ccount+lfunc.MaxCoeff+1]=FullMatrix[ccount:ccount+lfunc.MaxCoeff+1]*ExVec
+
+				for coeff in range(lfunc.MaxCoeff+1):
+					FullCompMatrix[ccount+coeff] = FullMatrix[ccount+coeff]*(1j**coeff)
+
+				rollVec = np.exp(2*np.pi*((binpos+0.5)*InterpBins)*rfftfreqs/InterpBins*1j)
 
 
-	rfftfreqs=np.linspace(0,lfunc.NFBasis,lfunc.NFBasis+1)/lfunc.Nbins[i]
-
-	pnoise = lfunc.ProfileInfo[i,6]*np.sqrt(lfunc.Nbins[i])/np.sqrt(2)
-
-	rollVec = np.exp(2*np.pi*RollBins[i]*rfftfreqs*1j)
-	rollS1 = s[i]*rollVec
-	s[i] = 	rollS1
-
-	#IFFTs = [np.fft.irfft(s[i], n=1024) for i in range(lfunc.NToAs)]	
-	FS = np.zeros(2*lfunc.NFBasis)
-	FS[:lfunc.NFBasis] = np.real(rollS1[1:])
-	FS[lfunc.NFBasis:] = np.imag(rollS1[1:])
-
-	FS /= np.sqrt(np.dot(FS,FS)/(2*lfunc.NFBasis))
-
-	MNM = np.dot(FS, FS)/(pnoise*pnoise)
-	detMNM = MNM
-	logdetMNM = np.log(detMNM)
-
-	InvMNM = 1.0/MNM
-
-	dNM = np.dot(lfunc.ProfileFData[i], FS)/(pnoise*pnoise)
-	dNMMNM = dNM*InvMNM
-
-	MarginLike = dNMMNM*dNM
-
-	profilelike = -0.5*(logdetMNM - MarginLike)
-	loglike += profilelike     
+				ScaleFactors = lfunc.Bconst(MeanBeta, np.arange(lfunc.MaxCoeff+1))
 
 
-		if(lfunc.doplot == True):
-		    baseline=dNMMNM[0]
-		    amp = dNMMNM[1]
-		    noise = np.std(lfunc.ProfileData[i] - baseline - amp*s)
-		    print i, amp, baseline, noise
-		    plt.plot(np.linspace(0,1,lfunc.Nbins[i]), lfunc.ProfileData[i])
-		    plt.plot(np.linspace(0,1,lfunc.Nbins[i]),baseline+s[i]*amp)
-		    plt.show()
-		    plt.plot(np.linspace(0,1,lfunc.Nbins[i]),lfunc.ProfileData[i]-(baseline+s[i]*amp))
-		    plt.show()
-		
-	return loglike+phasePrior
 
 
-def FFTMarginLogLike2(x):
-    
+				FullCompMatrix[ccount:ccount+lfunc.MaxCoeff+1] *= rollVec
+				for i in range(lfunc.MaxCoeff+1):
+					FullCompMatrix[i+ccount] *= ScaleFactors[i]
 
 
-	pcount = 0
-	phase=x[0]*lfunc.ReferencePeriod#lfunc.MeanPhase*lfunc.ReferencePeriod
-	phasePrior = -0.5*(phase-lfunc.MeanPhase)*(phase-lfunc.MeanPhase)/lfunc.PhasePrior/lfunc.PhasePrior
-
-	pcount += 1
-
-	NCoeff = lfunc.MaxCoeff-1
-	#pcount += 1
-
-
-	ShapeAmps=np.zeros([lfunc.MaxCoeff, lfunc.EvoNPoly+1])
-	ShapeAmps[0][0] = 1
-	ShapeAmps[1:]=x[pcount:pcount+(lfunc.MaxCoeff-1)*(lfunc.EvoNPoly+1)].reshape([(lfunc.MaxCoeff-1),(lfunc.EvoNPoly+1)])
-
-
-	pcount += (lfunc.MaxCoeff-1)*(lfunc.EvoNPoly+1)
-
-	TimingParameters=x[pcount:pcount+lfunc.numTime]
-	pcount += lfunc.numTime
-
-	loglike = 0
-
-	TimeSignal = np.dot(lfunc.designMatrix, TimingParameters)
-
-	xS = lfunc.ShiftedBinTimes[:,0]-phase
-
-	if(lfunc.numTime>0):
-		xS -= TimeSignal
-
-	xS = ( xS + lfunc.ReferencePeriod/2) % (lfunc.ReferencePeriod ) - lfunc.ReferencePeriod/2
-
-	InterpBins = (xS%(lfunc.ReferencePeriod/lfunc.Nbins[:])/lfunc.InterpolatedTime).astype(int)
-	WBTs = xS-lfunc.InterpolatedTime*InterpBins
-	RollBins=(np.round(WBTs/(lfunc.ReferencePeriod/lfunc.Nbins[:]))).astype(np.int)
-
-
-	#return [np.dot(lfunc.InterpFBasis[InterpBins[i]], np.sum(((lfunc.psr.freqs[i] - lfunc.EvoRefFreq)/1000.0)**np.arange(0,lfunc.EvoNPoly+1)*ShapeAmps, axis=1)) for i in range(len(RollBins))]
-	s = [np.dot(SplitBasis[InterpBins[i]], np.sum(((lfunc.psr.freqs[i] - lfunc.EvoRefFreq)/1000.0)**np.arange(0,lfunc.EvoNPoly+1)*ShapeAmps, axis=1)) for i in range(len(RollBins))]
-
+				ccount+=lfunc.MaxCoeff+1
 
 	
+			
 
-	for i in range(lfunc.NToAs):
-
-		rfftfreqs=np.linspace(1,lfunc.NFBasis,lfunc.NFBasis)/lfunc.Nbins[i]
-
-		pnoise = lfunc.ProfileInfo[i,6]*np.sqrt(lfunc.Nbins[i])/np.sqrt(2)
-
-		cosRoll = np.cos(2*np.pi*RollBins[i]*rfftfreqs)
-		sinRoll = np.sin(2*np.pi*RollBins[i]*rfftfreqs)
-
-		FS = s[i][:lfunc.NFBasis]*cosRoll + s[i][lfunc.NFBasis:]*sinRoll
-		s[i][lfunc.NFBasis:] = s[i][:lfunc.NFBasis]*sinRoll + s[i][lfunc.NFBasis:]*cosRoll
-		s[i][:lfunc.NFBasis] = FS
-
-		#rollVec = np.exp(2*np.pi*RollBins[i]*rfftfreqs*1j)
-		#rollS1 = s[i]*rollVec
-		
-		#FS = np.zeros(2*lfunc.NFBasis)
-		#FS[:lfunc.NFBasis] = np.real(rollS1)
-		#FS[lfunc.NFBasis:] = np.imag(rollS1)
-
-		s[i] /= np.sqrt(np.dot(s[i],s[i])/(2*lfunc.NFBasis))
-
-		MNM = np.dot(s[i], s[i])/(pnoise*pnoise)
-		detMNM = MNM
-		logdetMNM = np.log(detMNM)
-
-		InvMNM = 1.0/MNM
-
-		dNM = np.dot(lfunc.ProfileFData[i], s[i])/(pnoise*pnoise)
-		dNMMNM = dNM*InvMNM
-
-		MarginLike = dNMMNM*dNM
-
-		profilelike = -0.5*(logdetMNM - MarginLike)
-		loglike += profilelike     
+			FullJitterMatrix[0] = (1.0/np.sqrt(2.0))*(-1.0*FullCompMatrix[1])*MeanBeta
+			for i in range(1,lfunc.MaxCoeff):
+				FullJitterMatrix[i] = (1.0/np.sqrt(2.0))*(np.sqrt(1.0*i)*FullCompMatrix[i-1] - np.sqrt(1.0*(i+1))*FullCompMatrix[i+1])*MeanBeta
 
 
-		if(lfunc.doplot == True):
-		    baseline=dNMMNM[0]
-		    amp = dNMMNM[1]
-		    noise = np.std(lfunc.ProfileData[i] - baseline - amp*s)
-		    print i, amp, baseline, noise
-		    plt.plot(np.linspace(0,1,lfunc.Nbins[i]), lfunc.ProfileData[i])
-		    plt.plot(np.linspace(0,1,lfunc.Nbins[i]),baseline+s[i]*amp)
-		    plt.show()
-		    plt.plot(np.linspace(0,1,lfunc.Nbins[i]),lfunc.ProfileData[i]-(baseline+s[i]*amp))
-		    plt.show()
-		
-	return loglike+phasePrior
+			FullCompMatrix = FullCompMatrix.T
+			FullJitterMatrix = FullJitterMatrix.T
 
 
-import time
-start = time.clock()
-
-ltot=0
-for i in range(100):
-	if(i%10 == 0):
-		print i
+			InterpFShapeMatrix[t]  = np.copy(FullCompMatrix[:,:lfunc.MaxCoeff])
+			InterpFJitterMatrix[t] = np.copy(FullJitterMatrix[:,:lfunc.MaxCoeff])
 
 
+		threshold = 10.0**-10
+		upperindex=1
+		while(np.max(np.abs(InterpFShapeMatrix[0,upperindex:,:])) > threshold):
+			upperindex += 5
+			if(upperindex >= lenRFFT):
+				upperindex = lenRFFT-1
+				break
+			print "upper index is:", upperindex,np.max(np.abs(InterpFShapeMatrix[0,upperindex:,:]))
+		#InterpShapeMatrix = np.array(InterpShapeMatrix)
+		#InterpJitterMatrix = np.array(InterpJitterMatrix)
+		print("\nFinished Computing Interpolated Profiles")
 
-	l=FFTMarginLogLike(x)
-	ltot+=l
+
+		lfunc.InterpFBasis = InterpFShapeMatrix[:,1:upperindex]
+		lfunc.InterpFJitterMatrix = InterpFJitterMatrix[:,1:upperindex]
+		lfunc.InterpolatedTime  = InterpolatedTime
 
 
-end = time.clock()
+		Fdata =  np.fft.rfft(lfunc.ProfileData, axis=1)[:,1:upperindex]
 
-print "time", end-start
+		lfunc.NFBasis = upperindex - 1
+		lfunc.ProfileFData = np.zeros([lfunc.NToAs, 2*lfunc.NFBasis])
+		lfunc.ProfileFData[:, :lfunc.NFBasis] = np.real(Fdata)
+		lfunc.ProfileFData[:, lfunc.NFBasis:] = np.imag(Fdata)
+	
+                if(ToPickle == True):
+                        print "\nPickling Basis"
+                        output = open(lfunc.root+'-TScrunch.Basis.pickle', 'wb')
+                        pickle.dump(lfunc.ProfileFData, output)
+                        pickle.dump(lfunc.InterpFJitterMatrix, output)
+			pickle.dump(lfunc.InterpFBasis, output)
+                        output.close()
+
+        if(FromPickle == True):
+                print "Loading Basis from Pickled Data"
+                pick = open(lfunc.root+'-TScrunch.Basis.pickle', 'rb')
+                lfunc.ProfileFData = pickle.load(pick)
+                lfunc.InterpFJitterMatrix  = pickle.load(pick)
+		lfunc.InterpFBasis = pickle.load(pick)
+                pick.close()
+		lfunc.NFBasis = np.shape(lfunc.InterpFBasis)[1]
+		print "Loaded NFBasis: ", lfunc.NFBasis
+
+

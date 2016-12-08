@@ -19,7 +19,7 @@ lfunc.loadPulsar("OneChan.par", "OneChan.tim", root='Sim1-OneChan')
 
 lfunc.TScrunch(doplot = True, channels = 1)
 
-lfunc.getInitialParams(MaxCoeff = 20, cov_diag=[0.01, 0.1, 0.1], resume=True, outDir = './InitFFTMNChains/Max20-', sampler='multinest', incScattering = False, mn_live = 1000,  fitNComps = 1, doplot = True)
+lfunc.getInitialParams(MaxCoeff = 20, cov_diag=[0.01, 0.1, 0.1], resume=False, outDir = './InitFFTMNChains/Max20-', sampler='multinest', incScattering = False, mn_live = 1000,  fitNComps = 1, doplot = True)
 
 
 '''Make interpolation Matrix'''

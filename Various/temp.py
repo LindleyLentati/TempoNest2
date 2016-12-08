@@ -1,40 +1,47 @@
-def PrintEpochParams(time, string ='DMX'):
+chains=np.loadtxt('./TwoCompScatterHessChain/chain_1.txt').T
+burnin=10000
+ML=chains.T[np.argmax(chains[-3][burnin:])][:n_params]
 
-	time=30
-	stoas = lfunc.psr.stoas
-	mintime = stoas.min()
-	maxtime = stoas.max()
+import matplotlib.pyplot as plt
+import numpy as np
+from mpl_toolkits.axes_grid1 import make_axes_locatable
+from matplotlib.colors import LogNorm
+from matplotlib.ticker import MultipleLocator
 
-	NEpochs = (maxtime-mintime)/time
-	Epochs=mintime - time*0.01 + np.arange(NEpochs)*time #np.linspace(mintime-time*0.01, maxtime+time*0.01, int(NEpochs+3))
-	EpochList = []
-	for i in range(len(Epochs)-1):
-		select_indices = np.where(np.logical_and( stoas < Epochs[i+1], stoas >= Epochs[i]))[0]
-		if(len(select_indices) > 0):
-			EpochList.append(i)
+def WaterFallPlot(lfunc, ML):
 
-	EpochList = np.unique(np.array(EpochList))
-	for i in range(len(EpochList)):
-		if(i < 9):
-			print string+"_000"+str(i+1)+" -2.90883832 0"
-			print string+"R1_000"+str(i+1)+" "+str(Epochs[EpochList[i]])
-			print string+"R2_000"+str(i+1)+" "+str(Epochs[EpochList[i]+1])
-			print string+"ER_000"+str(i+1)+" 0.20435656\n"
+lfunc.doplot = True
+Res, Data, Model =lfunc.FFTMarginLogLike(ML)
 
-		if(i < 99 and i >= 9):
-			print string+"_00"+str(i+1)+" -2.90883832 0"
-			print string+"R1_00"+str(i+1)+" "+str(Epochs[EpochList[i]])
-			print string+"R2_00"+str(i+1)+" "+str(Epochs[EpochList[i]+1])
-			print string+"ER_00"+str(i+1)+" 0.20435656\n"
+Res=np.array(Res).T
+Data=np.array(Data).T	
+Model=np.array(Model).T
 
-		if(i < 999 and i >= 99):
-			print string+"_0"+str(i+1)+" -2.90883832 0"
-			print string+"R1_0"+str(i+1)+" "+str(Epochs[EpochList[i]])
-			print string+"R2_0"+str(i+1)+" "+str(Epochs[EpochList[i]+1])
-			print string+"ER_0"+str(i+1)+" 0.20435656\n"
+x=np.float64(lfunc.psr.stoas)
+tdiff = np.max(lfunc.psr.stoas) - np.min(lfunc.psr.stoas)
+aspectgoal = 16.0/6
+aspect=tdiff/aspectgoal
 
-		if(i < 9999 and i >= 999):
-			print string+"_"+str(i+1)+" -2.90883832 0"
-			print string+"R1_"+str(i+1)+" "+str(Epochs[EpochList[i]])
-			print string+"R2_"+str(i+1)+" "+str(Epochs[EpochList[i]+1])
-			print string+"ER_"+str(i+1)+" 0.20435656\n"
+fig, (ax1, ax2) = plt.subplots(2,1)
+
+im1 = ax1.imshow(np.log10(np.abs(Data)), interpolation="none", extent=(x[0], x[-1], 0, 1), aspect=aspect)
+#divider1 = make_axes_locatable(ax1)
+# Append axes to the right of ax3, with 20% width of ax3
+#cax1 = divider1.append_axes("right", size="20%", pad=0.05)
+# Create colorbar in the appended axes
+# Tick locations can be set with the kwarg `ticks`
+# and the format of the ticklabels with kwarg `format`
+#cbar1 = plt.colorbar(im1, cax=cax1, ticks=MultipleLocator(0.2), format="%.2f")
+
+im2 = ax2.imshow(np.abs(Res), interpolation="none", extent=(np.min(x), np.max(x), 0, 1), aspect=aspect)
+#divider2 = make_axes_locatable(ax2)
+# Append axes to the right of ax3, with 20% width of ax3
+#cax2 = divider2.append_axes("right", size="20%", pad=0.05)
+# Create colorbar in the appended axes
+# Tick locations can be set with the kwarg `ticks`
+# and the format of the ticklabels with kwarg `format`
+#cbar2 = plt.colorbar(im2, cax=cax2, ticks=MultipleLocator(0.2), format="%.2f")
+
+plt.show()
+
+WaterFallPlot(ML)

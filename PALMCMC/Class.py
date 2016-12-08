@@ -45,6 +45,7 @@ class Likelihood(object):
 
 		self.designMatrix = None
 		self.FisherU = None
+		self.FisherS = None
 
 		self.TScrunched = None
 		self.TScrunchedNoise = None
@@ -264,6 +265,7 @@ class Likelihood(object):
 			FisherU,FisherS,FisherVT=np.linalg.svd(Fisher)
 
 			self.FisherU = FisherU
+			self.FisherS = FisherS
 
 		self.ProfileStartBats = self.ProfileInfo[:,2]/self.SECDAY + self.ProfileInfo[:,3]*0 + self.ProfileInfo[:,3]*0.5 + self.BatCorrs
 		self.ProfileEndBats =  self.ProfileInfo[:,2]/self.SECDAY + self.ProfileInfo[:,3]*(self.ProfileInfo[:,4]-1) + self.ProfileInfo[:,3]*0.5 + self.BatCorrs
@@ -1534,7 +1536,7 @@ class Likelihood(object):
 			rollS1 = s[i]*rollVec
 
 			if(self.NScatterEpochs > 0):
-				ScatterScale = self.psr.ssbfreqs()[i]**4/10.0**(9.0*4.0)
+				ScatterScale = self.ssbfreqs[i]**4/10.0**(9.0*4.0)
 				STime = (10.0**self.MeanScatter)/ScatterScale
 				ScatterVec = self.ConvolveExp(rfftfreqs*self.Nbins[i]/self.ReferencePeriod, STime)
 
@@ -1846,8 +1848,8 @@ class Likelihood(object):
 			rollVec = np.exp(2*np.pi*RollBins[i]*rfftfreqs*1j)
 			rollS1 = s[i]*rollVec
 
-			if(self.NScatterEpochs > 0):
-				ScatterScale = self.psr.ssbfreqs()[i]**4/10.0**(9.0*4.0)
+			if(self.ScatterInfo[i] != None):
+				ScatterScale = self.ssbfreqs[i]**4/10.0**(9.0*4.0)
 				STime = np.sum(ScatteringParameters[self.ScatterInfo[i]])/ScatterScale
 				ScatterVec = self.ConvolveExp(rfftfreqs*self.Nbins[i]/self.ReferencePeriod, STime)
 
@@ -2029,7 +2031,7 @@ class Likelihood(object):
 					tau = 10.0**x[-self.NScatterEpochs+c]
 					f = np.linspace(1,self.NFBasis,self.NFBasis)/self.ReferencePeriod
 					w = 2.0*np.pi*f
-					ScatterScale = 1.0/(self.psr.ssbfreqs()[i]**4/10.0**(9.0*4.0))
+					ScatterScale = 1.0/(self.ssbfreqs[i]**4/10.0**(9.0*4.0))
 
 					Conv = self.ConvolveExp(f, tau*ScatterScale)
 
@@ -2223,85 +2225,86 @@ class Likelihood(object):
 			'''
 
 			for c in range(self.NScatterEpochs):
-				if(c in self.ScatterInfo[i]):
+				if(self.ScatterInfo[i] != None):
+					if(c in self.ScatterInfo[i]):
 
-					tau = ScatteringParameters[c]
-					f = np.linspace(1,self.NFBasis,self.NFBasis)/self.ReferencePeriod
-					w = 2.0*np.pi*f
-					ISS = 1.0/(self.psr.ssbfreqs()[i]**4/10.0**(9.0*4.0))
+						tau = ScatteringParameters[c]
+						f = np.linspace(1,self.NFBasis,self.NFBasis)/self.ReferencePeriod
+						w = 2.0*np.pi*f
+						ISS = 1.0/(self.psr.ssbfreqs()[i]**4/10.0**(9.0*4.0))
 
-					Conv = self.ConvolveExp(f, tau*ISS)
-					#MLProf = MLAmp*FFTS[i]#/FSdot
-					#ConvProf = Conv*MLProf
-
-
-					RConv = np.real(Conv)
-					IConv = np.imag(Conv)
+						Conv = self.ConvolveExp(f, tau*ISS)
+						#MLProf = MLAmp*FFTS[i]#/FSdot
+						#ConvProf = Conv*MLProf
 
 
-					#PVec = np.zeros(2*self.NFBasis)
-					#PVec[:self.NFBasis] = MLAmp*np.real(FFTS[i])/FSdot
-					#PVec[self.NFBasis:] = MLAmp*np.imag(FFTS[i])/FSdot
-
-					RProf = MLAmp*np.real(FFTS[i])/FSdot
-					IProf = MLAmp*np.imag(FFTS[i])/FSdot
-
-					pnoise = self.ProfileInfo[i,6]*np.sqrt(self.Nbins[i])/np.sqrt(2)
-					'''
-					dval=self.ProfileFData[i][0]
-					prval=PVec[:self.NFBasis][0]
-					pival=PVec[self.NFBasis:][0]
-					wval=w[0]
-					sval=ISS
-					tval=np.log10(tau)
-					oval = pnoise
-					dval, prval, pival, wval, sval, tval,oval
-
-					dival=self.ProfileFData[i][self.NFBasis]
-					prval=PVec[:self.NFBasis][0]
-					pival=PVec[self.NFBasis:][0]
-					wval=w[0]
-					sval=ISS
-					tval=np.log10(tau)
-					oval = pnoise
-					dival, prval, pival, wval, sval, tval,oval
-					'''
-					HessDenom = 1.0/(1.0 + tau**2*w**2*ISS**2)**3
-					GradDenom = 1.0/(1.0 + tau**2*w**2*ISS**2)**2
-
-					Reaself = (self.ProfileFData[i][:self.NFBasis] - RProf*RConv + IProf*IConv)
-					RealGrad = 2*tau**2*ISS**2*w**2*np.log(10.0)*GradDenom*RProf + tau*ISS*w*(tau**2*ISS**2*w**2 - 1)*np.log(10.0)*GradDenom*IProf
-					RealHess = -(4*tau**2*ISS**2*w**2*(tau**2*ISS**2*w**2 - 1)*np.log(10.0)**2)*HessDenom*RProf - tau*ISS*w*(1+tau**2*ISS**2*w**2*(tau**2*ISS**2*w**2 - 6))*np.log(10.0)**2*HessDenom*IProf
-
-					FullRealHess = 1*(RealHess*Reaself + RealGrad**2)*(1.0/pnoise**2)
-
-					ImagFunc = (self.ProfileFData[i][self.NFBasis:] - RProf*IConv - IProf*RConv)
-					ImagGrad = 2*tau**2*ISS**2*w**2*np.log(10.0)*GradDenom*IProf - tau*ISS*w*(tau**2*ISS**2*w**2 - 1)*np.log(10.0)*GradDenom*RProf
-					ImagHess = -(4*tau**2*ISS**2*w**2*(tau**2*ISS**2*w**2 - 1)*np.log(10.0)**2)*HessDenom*IProf + tau*ISS*w*(1+tau**2*ISS**2*w**2*(tau**2*ISS**2*w**2 - 6))*np.log(10.0)**2*HessDenom*RProf
+						RConv = np.real(Conv)
+						IConv = np.imag(Conv)
 
 
+						#PVec = np.zeros(2*self.NFBasis)
+						#PVec[:self.NFBasis] = MLAmp*np.real(FFTS[i])/FSdot
+						#PVec[self.NFBasis:] = MLAmp*np.imag(FFTS[i])/FSdot
 
-					FullImagHess = 1*(ImagHess*ImagFunc + ImagGrad**2)*(1.0/pnoise**2)
+						RProf = MLAmp*np.real(FFTS[i])/FSdot
+						IProf = MLAmp*np.imag(FFTS[i])/FSdot
+
+						pnoise = self.ProfileInfo[i,6]*np.sqrt(self.Nbins[i])/np.sqrt(2)
+						'''
+						dval=self.ProfileFData[i][0]
+						prval=PVec[:self.NFBasis][0]
+						pival=PVec[self.NFBasis:][0]
+						wval=w[0]
+						sval=ISS
+						tval=np.log10(tau)
+						oval = pnoise
+						dval, prval, pival, wval, sval, tval,oval
+
+						dival=self.ProfileFData[i][self.NFBasis]
+						prval=PVec[:self.NFBasis][0]
+						pival=PVec[self.NFBasis:][0]
+						wval=w[0]
+						sval=ISS
+						tval=np.log10(tau)
+						oval = pnoise
+						dival, prval, pival, wval, sval, tval,oval
+						'''
+						HessDenom = 1.0/(1.0 + tau**2*w**2*ISS**2)**3
+						GradDenom = 1.0/(1.0 + tau**2*w**2*ISS**2)**2
+
+						Reaself = (self.ProfileFData[i][:self.NFBasis] - RProf*RConv + IProf*IConv)
+						RealGrad = 2*tau**2*ISS**2*w**2*np.log(10.0)*GradDenom*RProf + tau*ISS*w*(tau**2*ISS**2*w**2 - 1)*np.log(10.0)*GradDenom*IProf
+						RealHess = -(4*tau**2*ISS**2*w**2*(tau**2*ISS**2*w**2 - 1)*np.log(10.0)**2)*HessDenom*RProf - tau*ISS*w*(1+tau**2*ISS**2*w**2*(tau**2*ISS**2*w**2 - 6))*np.log(10.0)**2*HessDenom*IProf
+
+						FullRealHess = 1*(RealHess*Reaself + RealGrad**2)*(1.0/pnoise**2)
+
+						ImagFunc = (self.ProfileFData[i][self.NFBasis:] - RProf*IConv - IProf*RConv)
+						ImagGrad = 2*tau**2*ISS**2*w**2*np.log(10.0)*GradDenom*IProf - tau*ISS*w*(tau**2*ISS**2*w**2 - 1)*np.log(10.0)*GradDenom*RProf
+						ImagHess = -(4*tau**2*ISS**2*w**2*(tau**2*ISS**2*w**2 - 1)*np.log(10.0)**2)*HessDenom*IProf + tau*ISS*w*(1+tau**2*ISS**2*w**2*(tau**2*ISS**2*w**2 - 6))*np.log(10.0)**2*HessDenom*RProf
 
 
-					profhess = np.zeros(2*self.NFBasis)
-					profhess[:self.NFBasis] = FullRealHess
-					profhess[self.NFBasis:] = FullImagHess
 
-					profgrad = np.zeros(2*self.NFBasis)
-					profgrad[:self.NFBasis] = RealGrad*(1.0/pnoise)
-					profgrad[self.NFBasis:] = ImagGrad*(1.0/pnoise)
+						FullImagHess = 1*(ImagHess*ImagFunc + ImagGrad**2)*(1.0/pnoise**2)
 
-					LinearScatterCross = np.dot(HessMatrix, profgrad)
 
-					
-					
+						profhess = np.zeros(2*self.NFBasis)
+						profhess[:self.NFBasis] = FullRealHess
+						profhess[self.NFBasis:] = FullImagHess
 
-					Hessian[pcount+c,pcount+c] += np.sum(profhess)
-					Hessian[:LinearSize, pcount+c] += -LinearScatterCross
-					Hessian[pcount+c, :LinearSize] += -LinearScatterCross
-					
-					pcount += 1
+						profgrad = np.zeros(2*self.NFBasis)
+						profgrad[:self.NFBasis] = RealGrad*(1.0/pnoise)
+						profgrad[self.NFBasis:] = ImagGrad*(1.0/pnoise)
+
+						LinearScatterCross = np.dot(HessMatrix, profgrad)
+
+						
+						
+
+						Hessian[pcount+c,pcount+c] += np.sum(profhess)
+						Hessian[:LinearSize, pcount+c] += -LinearScatterCross
+						Hessian[pcount+c, :LinearSize] += -LinearScatterCross
+						
+						pcount += 1
 
 
 		self.hess = Hessian
@@ -2421,15 +2424,15 @@ class Likelihood(object):
 	#Jump proposal for the timing model parameters
 	def TimeJump(self, x, iteration, beta):
 
-
+		TStartDim=1 + (self.TotCoeff-1)*(self.EvoNPoly+1)
 		q=x.copy()
-		y=np.dot(self.FisherU.T,x[-self.numTime:])
+		y=np.dot(self.FisherU.T,x[TStartDim:TStartDim+self.numTime])
 		ind = np.unique(np.random.randint(0,self.numTime,np.random.randint(0,self.numTime,1)[0]))
 		ran=np.random.standard_normal(self.numTime)
 		y[ind]=y[ind]+ran[ind]#/np.sqrt(FisherS[ind])
 
 		newpars=np.dot(self.FisherU, y)
-		q[-self.numTime:]=newpars
+		q[TStartDim:TStartDim+self.numTime]=newpars
 
 	
 		return q, 0
