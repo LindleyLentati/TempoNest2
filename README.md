@@ -1,3 +1,3 @@
-# PyProfileDomain
+# TempoNest2
 
-Python based profile domain pipeline.  Ultra Alpha Version.
+Python based replacement for TempoNest.  Designed for profile domain pulsar timing analysis.
