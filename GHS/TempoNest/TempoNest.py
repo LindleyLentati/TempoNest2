@@ -162,7 +162,10 @@ class Likelihood(object):
 		self.incECORR = False
 		self.fitECORRSignal = False
 		self.fitECORRPrior = False
-
+		self.incBaseLineNoise = False
+		self.fitBaseLineNoiseSignal = False
+		self.fitBaseLineNoisePrior = False
+		self.BaselineNoiseModel = None
 
 
 
@@ -254,6 +257,64 @@ class Likelihood(object):
 
 					ResVec[Signal_Index] = RolledData[i]-Amps[ToA_Index]*Signal[Signal_Index];
 					NResVec[Signal_Index] = ResVec[Signal_Index]/Noise[ToA_Index];
+				}
+
+			}
+
+			__global__ void getBaselineNoiseRes(double *ResVec, double *NResVec, double *RolledData, double *Signal, double *Amps, double *Noise, double *BaseLineNoise, const int32_t *ToAIndex, const int32_t *SignalIndex, const int32_t TotBins){
+
+				const int i = blockDim.x*blockIdx.x + threadIdx.x;
+
+				if(i < TotBins){
+					const int32_t ToA_Index = ToAIndex[i];  
+					const int32_t Signal_Index = SignalIndex[i];  
+
+					ResVec[Signal_Index] = RolledData[i]-Amps[ToA_Index]*Signal[Signal_Index] - BaseLineNoise[Signal_Index];
+					NResVec[Signal_Index] = ResVec[Signal_Index]/Noise[ToA_Index];
+
+				}
+
+			}
+
+			__global__ void getBaselineNoiseGrads(double *NResVec, double *BaseLineNoise, double *Amps, double *Specs, double *AmpGrads, double *SpecGrads, double *PriorLike, const int32_t Step, const int32_t NToAs, const int32_t NFBasis, const int32_t NFBasis, const int32_t BLRefFreq){
+
+				const int i = blockDim.x*blockIdx.x + threadIdx.x;
+
+				if(i < NToAs){
+
+					int32_t c = 0;
+
+					AmpGrads[i] = 0;
+					SpecGrads[i] = 0;
+					PriorLike[i] = 0;
+
+					double Amp = pow(10.0, 2*Amps[i]);
+
+					for(c = 0; c < NFBasis; c++){
+
+						double freq = ((c+1.0)/NFBasis)/BLRefFreq;
+						double power = Amp*pow(freq, -Specs[i]);
+						double pdet = 0.5*log(power*power);
+
+						PriorLike[i] += 0.5*BaseLineNoise[i*2*NFBasis+c]*BaseLineNoise[i*2*NFBasis+c]/power + pdet;
+						PriorLike[i] += 0.5*BaseLineNoise[i*2*NFBasis+c+NFBasis]*BaseLineNoise[i*2*NFBasis+c+NFBasis]/power + pdet;
+
+						AmpGrads[i] += -log(10.0)*BaseLineNoise[i*2*NFBasis+c]*BaseLineNoise[i*2*NFBasis+c]/power;
+						AmpGrads[i] += -log(10.0)*BaseLineNoise[i*2*NFBasis+c+NFBasis]*BaseLineNoise[i*2*NFBasis+c+NFBasis]/power;
+
+						SpecGrads[i] += log(freq)*BaseLineNoise[i*2*NFBasis+c]*BaseLineNoise[i*2*NFBasis+c]/power;
+				                SpecGrads[i] += log(freq)*BaseLineNoise[i*2*NFBasis+c+NFBasis]*BaseLineNoise[i*2*NFBasis+c+NFBasis]/power;						
+
+						double BLNGrad = -BaseLineNoise[i*2*NFBasis+c]*NResVec[i*2*NFBasis+c];
+
+						BaseLineNoise[i*2*NFBasis+c] = BLNGrad;
+
+						BLNGrad = -BaseLineNoise[i*2*NFBasis+c+NFBasis]*NResVec[i*2*NFBasis+c+NFBasis];
+
+						BaseLineNoise[i*2*NFBasis+c+NFBasis] = BLNGrad;
+						
+						
+					}
 				}
 
 			}
@@ -2664,7 +2725,35 @@ class Likelihood(object):
 			
 			JitterSignal = ECORRSignal[self.EpochIndex]
 
-			self.TimeJitterSignal_GPU = gpuarray.to_gpu(JitterSignal)		
+			self.TimeJitterSignal_GPU = gpuarray.to_gpu(JitterSignal)	
+
+		if(self.incBaselineNoise == True):
+		
+			if(self.fitBaseLineNoisePrior == True):
+				index=self.ParamDict['BaseLineNoisePrior'][0]
+				BaseLineNoisePriorAmps  = params[index:index+self.NToAs]
+				BaseLineNoisePriorSpecs  = params[index+self.NToAs:index+2*self.NToAs]
+				for i in range(self.NToAs):
+					if(BaseLineNoisePriorAmps[i] < -10):
+						like += -np.log(10.0)*(BaseLineNoisePriorAmps[i]+10)
+						grad[i+index] += -np.log(10.0)
+			else:
+				BaseLineNoisePriorAmps  = copy.copy(self.MLParameters[self.ParamDict['BaseLineNoisePrior'][2]])[:self.NToAs]
+				BaseLineNoisePriorSpecs  = copy.copy(self.MLParameters[self.ParamDict['BaseLineNoisePrior'][2]])[self.NToAs:2*self.NToAs]
+
+			BaseLineNoisePriorAmps = 10.0**BaseLineNoisePriorAmps
+		
+			if(self.fitBaseLineNoiseSignal == True):
+				index=self.ParamDict['BaseLineNoiseSignal'][0]
+				BaseLineNoiseSignal = params[index:index+self.NToAs*2*self.NFBasis]
+
+			else:
+				BaseLineNoiseSignal = copy.copy(self.MLParameters[self.ParamDict['BaseLineNoiseSignal'][2]])
+			
+			self.BaseLineNoiseSignal_GPU = gpuarray.to_gpu(BaseLineNoiseSignal)
+			self.BaseLineNoiseAmps_GPU = gpuarray.to_gpu(BaseLineNoisePriorAmps)
+			self.BaseLineNoiseSpecs_GPU = gpuarray.to_gpu(BaseLineNoisePriorSpecs)
+			
 
 
 		if(self.incLinearTM == True):
@@ -3394,6 +3483,11 @@ class Likelihood(object):
 
 		self.TimeJitterSignal_GPU = gpuarray.zeros(self.NToAs, np.float64)
 
+		if(self.incBaselineNoise == True):
+			self.BaseLineNoiseSignal_GPU = gpuarray.zeros(self.NToAs*2*self.NFBasis, np.float64)
+			self.BaseLineNoiseAmps_GPU = gpuarray.zeros(self.NToAs, np.float64)
+			self.BaseLineNoiseSpecs_GPU = gpuarray.zeros(self.NToAs, np.float64)
+
 		self.InitGPU = False
 
 		return
@@ -3752,6 +3846,62 @@ class Likelihood(object):
 
 		return ECORRParamList
 
+	def addBaselineNoise(self, FitSignal = True, FitPrior = True, MLSignal = None, MLPrior = None, model = None, writeSignal=True, writePrior=True):
+
+		self.incBaselineNoise = True
+		self.fitBaselineNoiseSignal = FitSignal
+		self.fitBaselineNoisePrior = FitPrior
+		self.BaselineNoiseModel = model
+
+		pstart, pstop = len(self.parameters), len(self.parameters)+self.NToAs*self.NFBasis*2 
+		MLpos = len(self.MLParameters)
+		wstart, wstop = len(self.ParametersToWrite), len(self.ParametersToWrite)+self.NToAs*self.NFBasis*2 
+		AmIInLinear = 0
+		#if(FitSignal == True):	
+		#	AmIInLinear = 1
+
+		self.ParamDict['BaselineNoiseSignal'] = (pstart, pstop, MLpos, wstart, wstop, AmIInLinear)
+
+		if(FitSignal == True):	
+			self.DiagParams += self.NToAs*self.NFBasis*2 
+			self.LinearParams += self.NFBasis*2 
+			for i in range(self.NToAs):
+				for j in range(self.NFBasis*2):
+					if(writeSignal==True):
+						self.ParametersToWrite.append(len(self.parameters))
+				self.parameters.append("PBNSignal_"+str(i)+"_"+str(j))
+			
+		if(MLSignal == None):
+			self.MLParameters.append(np.zeros(self.NToAs*self.NFBasis*2))
+		else:
+			self.MLParameters.append(MLSignal)
+			
+		pstart, pstop = len(self.parameters), len(self.parameters)+2*self.NToAs
+		MLpos = len(self.MLParameters)
+		wstart, wstop = len(self.ParametersToWrite), len(self.ParametersToWrite)+2*self.NToAs
+		AmIInLinear = 0
+
+		self.ParamDict['BaselineNoisePrior'] = (pstart, pstop, MLpos, wstart, wstop, AmIInLinear)
+
+			
+		if(FitPrior == True):	
+			self.DiagParams += 2*self.NToAs
+			for i in range(self.NToAs):
+				if(writePrior==True):
+					self.ParametersToWrite.append(len(self.parameters))
+				self.parameters.append("BLNPriorA_"+str(i))
+			for i in range(self.NToAs):
+				if(writePrior==True):
+					self.ParametersToWrite.append(len(self.parameters))
+				self.parameters.append("BLNPriorS_"+str(i))
+	
+		if(MLPrior == None):
+			self.MLParameters.append(np.ones(self.NToAs)*-1)
+			self.MLParameters.append(np.ones(self.NToAs)*4)
+		else:
+			self.MLParameters.append(MLPrior)
+	
+		return
 
 
 	def SimArchives(self, ML, addNoise = False, outDir="./SimProfs", calcAmps=False, calcNoise=False, ASCII = True, TimeDomain = False):
