@@ -1450,7 +1450,7 @@ class Likelihood(object):
 				ccount += self.MaxCoeff[comp]
 
 
-	def PreComputeFFTShapelets(self, interpTime = 1, MeanBeta = 0.1, ToPickle = False, FromPickle = False, doplot = False):
+	def PreComputeFFTShapelets(self, interpTime = 1, MeanBeta = 0.1, ToPickle = False, FromPickle = False, doplot = False, useNFBasis = 0):
 
 
 		print("Calculating Shapelet Interpolation Matrix : ", interpTime, MeanBeta);
@@ -1555,7 +1555,10 @@ class Likelihood(object):
 			#InterpJitterMatrix = np.array(InterpJitterMatrix)
 			print("\nFinished Computing Interpolated Profiles")
 
-			self.NFBasis = upperindex - 1
+			if(useNFBasis > 0):
+				self.NFBasis = useNFBasis
+			else:
+				self.NFBasis = upperindex - 1
 
 			self.InterpFBasis = np.zeros([numtointerpolate, self.NFBasis*2, self.TotCoeff])
 			self.InterpJBasis = np.zeros([numtointerpolate, self.NFBasis*2, self.TotCoeff])
@@ -1910,7 +1913,7 @@ class Likelihood(object):
 				ISS = 1.0/(self.psr.ssbfreqs()[i]**ScatterFreqScale/self.ScatterRefFreq**(ScatterFreqScale))
 				ISS2 = 1.0/(self.psr.ssbfreqs()[i]**ScatterFreqScale/10.0**(9.0*ScatterFreqScale))
 				#ISS = 1.0/((self.psr.ssbfreqs()[i]**ScatterFreqScale)/(self.ScatterRefFreq**(ScatterFreqScale)))
-				print i, self.psr.freqs[i], ISS, ISS2, tau*ISS
+				#print i, self.psr.freqs[i], ISS, ISS2, tau*ISS
 				RConv, IConv = self.ConvolveExp(f, tau*ISS)
 
 				RConfProf = RConv*s[i][:self.NFBasis] - IConv*s[i][self.NFBasis:]
@@ -2295,7 +2298,7 @@ class Likelihood(object):
 						ISS = 1.0/(self.psr.ssbfreqs()[i]**ScatterFreqScale/self.ScatterRefFreq**(ScatterFreqScale))
 						ISS2 = 1.0/(self.psr.ssbfreqs()[i]**ScatterFreqScale/10.0**(9.0*ScatterFreqScale))
 						#ISS = 1.0/((self.psr.ssbfreqs()[i]**ScatterFreqScale)/(self.ScatterRefFreq**(ScatterFreqScale)))
-						print i, self.psr.freqs[i], ISS, 1.0/ISS, ISS2, tau*ISS
+						#print i, self.psr.freqs[i], ISS, 1.0/ISS, ISS2, tau*ISS
 						RConv, IConv = self.ConvolveExp(f, tau*ISS)
 
 						RProf = NoScatterS[:self.NFBasis]*MLAmp
@@ -4457,7 +4460,7 @@ class Likelihood(object):
 
 
 
-	def AddShapeCoeffs(self, NewNumCoeffs, interpTime = 1):
+	def AddShapeCoeffs(self, NewNumCoeffs, interpTime = 1, useNFBasis = 0):
 
 		OldNumCoeff = self.TotCoeff
 
@@ -4469,7 +4472,7 @@ class Likelihood(object):
 		newShape[:OldNumCoeff,:] = self.MLShapeCoeff
 		self.MLShapeCoeff = newShape
 
-		self.PreComputeFFTShapelets(interpTime = interpTime, MeanBeta = self.MeanBeta, doplot=False)
+		self.PreComputeFFTShapelets(interpTime = interpTime, MeanBeta = self.MeanBeta, doplot=False, useNFBasis = useNFBasis)
 		self.InitGPU == True
 
 
@@ -4518,7 +4521,8 @@ class Likelihood(object):
 
 		if(self.InitGPU == True):
 			self.init_gpu_arrays()
-			
+		
+		print "Computing Global Maximum\n"	
 		r2=optimize.fmin_l_bfgs_b(self.LBFGSlikewrap, np.zeros(self.n_params), fprime=self.LBFGSgradwrap)
 
 		NumML=(self.startPoint + r2[0]*np.sqrt(1.0/np.abs(self.EigV)))
