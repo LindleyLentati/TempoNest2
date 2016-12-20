@@ -4473,7 +4473,7 @@ class Likelihood(object):
 		self.MLShapeCoeff = newShape
 
 		self.PreComputeFFTShapelets(interpTime = interpTime, MeanBeta = self.MeanBeta, doplot=False, useNFBasis = useNFBasis)
-		self.InitGPU == True
+		self.InitGPU = True
 
 
 	def LBFGSlikewrap(self, x):
