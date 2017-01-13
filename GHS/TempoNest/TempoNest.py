@@ -4,6 +4,7 @@ import psrchive
 import numpy as np
 import matplotlib.pyplot as plt
 import scipy.linalg as sl
+from scipy import optimize
 import PTMCMCSampler
 from PTMCMCSampler import PTMCMCSampler as ptmcmc
 import scipy as sp
@@ -103,6 +104,8 @@ class Likelihood(object):
 		self.hess = None
 		self.EigM = None
 		self.EigV = None
+		self.BLNHess = None
+		self.BLNEigM = None
 		self.GHSoutfile = None
 
 		self.InterpolatedTime = None
@@ -124,6 +127,8 @@ class Likelihood(object):
 		self.chains = None
 		self.ShapePhaseCov = None
 		self.returnVal  = 0;
+
+		self.FindML = False
 
 		#Model Parameters
 
@@ -156,16 +161,19 @@ class Likelihood(object):
 		self.incScatter = False
 		self.fitScatter = False
 		self.fitScatterFreqScale = False
+		self.fitScatterPrior = 0
 		self.incEQUAD = False
 		self.fitEQUADSignal = False
 		self.fitEQUADPrior = False
 		self.incECORR = False
 		self.fitECORRSignal = False
 		self.fitECORRPrior = False
-		self.incBaseLineNoise = False
-		self.fitBaseLineNoiseSignal = False
-		self.fitBaseLineNoisePrior = False
-		self.BaselineNoiseModel = None
+		self.incBaselineNoise = False
+		self.BaselineNoisePrior = None
+		self.fitBaselineNoiseAmpPrior = False
+		self.fitBaselineNoiseSpecPrior = False
+		self.BaselineNoiseParams = None
+		self.BaselineNoiseRefFreq = 1
 
 
 
@@ -261,22 +269,36 @@ class Likelihood(object):
 
 			}
 
-			__global__ void getBaselineNoiseRes(double *ResVec, double *NResVec, double *RolledData, double *Signal, double *Amps, double *Noise, double *BaseLineNoise, const int32_t *ToAIndex, const int32_t *SignalIndex, const int32_t TotBins){
+			__global__ void getBaselineNoiseRes(double *ResVec, double *NResVec, double *RolledData, double *Signal, double *Amps, double *Noise, const int32_t *ToAIndex, const int32_t *SignalIndex, const int32_t TotBins, const int32_t NFBasis, double *BLAmps, double *BLSpecs, double *PriorDet, const int32_t BLRefP){
 
 				const int i = blockDim.x*blockIdx.x + threadIdx.x;
 
 				if(i < TotBins){
 					const int32_t ToA_Index = ToAIndex[i];  
-					const int32_t Signal_Index = SignalIndex[i];  
+					const int32_t Signal_Index = SignalIndex[i]; 
+					const int32_t F_Index = Signal_Index%NFBasis;
 
-					ResVec[Signal_Index] = RolledData[i]-Amps[ToA_Index]*Signal[Signal_Index] - BaseLineNoise[Signal_Index];
-					NResVec[Signal_Index] = ResVec[Signal_Index]/Noise[ToA_Index];
+					double BLAmp = pow(10.0, 2*BLAmps[ToA_Index]);
+					double BLSpec = BLSpecs[ToA_Index]; 
+					double Freq = (F_Index + 1.0)/BLRefP;
+
+					if(NFBasis-F_Index <= 5){
+						BLAmp = 0;
+					}
+
+					double NoiseVal = BLAmp*pow(Freq, -BLSpec) + Noise[ToA_Index];
+					//double NDet = log(NoiseVal);
+
+					ResVec[Signal_Index] = RolledData[i]-Amps[ToA_Index]*Signal[Signal_Index];
+					NResVec[Signal_Index] = ResVec[Signal_Index]/NoiseVal;
+					//PriorDet[Signal_Index] = NDet;
 
 				}
 
 			}
 
-			__global__ void getBaselineNoiseGrads(double *NResVec, double *BaseLineNoise, double *Amps, double *Specs, double *AmpGrads, double *SpecGrads, double *PriorLike, const int32_t Step, const int32_t NToAs, const int32_t NFBasis, const int32_t NFBasis, const int32_t BLRefFreq){
+
+			__global__ void getBaselineNoiseRes2(double *ResVec, double *NResVec, double *RolledData, double *Signal, double *Amps, double *Noise, const int32_t *ToAIndex, const int32_t *SignalIndex, const int32_t TotBins, const int32_t NFBasis, double *BLAmps, double *BLSpecs, double *PriorDet, const int32_t BLRefP, const int32_t NToAs){
 
 				const int i = blockDim.x*blockIdx.x + threadIdx.x;
 
@@ -284,34 +306,88 @@ class Likelihood(object):
 
 					int32_t c = 0;
 
-					AmpGrads[i] = 0;
-					SpecGrads[i] = 0;
+                                        PriorDet[i] = 0;
+
+                                        double Amp = pow(10.0, 2*BLAmps[i]);
+                                        double Spec = BLSpecs[i];
+					double NVal = Noise[i];
+
+					double NoiseGrad = 0;
+                                        double AmpGrad = 0;
+                                        double SpecGrad = 0;
+
+                                        for(c = 0; c < NFBasis; c++){
+
+						double BLAmp = pow(10.0, 2*BLAmps[i]);
+						double BLSpec = BLSpecs[i]; 
+						double Freq = (c + 1.0)/BLRefP;
+
+						if(NFBasis-c <= 5){
+							BLAmp = 0;
+						}
+
+						double BLNPower = BLAmp*pow(Freq, -BLSpec);
+						double NoiseVal = BLNPower + NVal;
+						double Denom = (1.0 - ResVec[i*2*NFBasis + c]*NResVec[i*2*NFBasis + c])/NoiseVal;
+
+						NoiseGrad += sqrt(Noise[i])*Denom;
+						AmpGrad +=   log(10.0)*BLNPower*Denom;
+						SpecGrad += -0.5*log(Freq)*BLNPower*Denom;
+
+
+						Denom = (1.0 - ResVec[i*2*NFBasis + c + NFBasis]*NResVec[i*2*NFBasis + c + NFBasis])/NoiseVal;
+
+						NoiseGrad += sqrt(Noise[i])*Denom;
+						AmpGrad +=   log(10.0)*BLNPower*Denom;
+						SpecGrad += -0.5*log(Freq)*BLNPower*Denom;
+
+						double NDet = log(NoiseVal);
+
+						PriorDet[i] += 2*NDet;
+						
+					}
+					BLAmps[i] = AmpGrad;
+					BLSpecs[i] = SpecGrad;
+					Noise[i] = NoiseGrad;
+
+				}
+
+			}
+
+			__global__ void getBaselineNoiseGrads(double *NResVec, double *BaselineNoise, double *Amps, double *Specs, double *PriorLike, const int32_t Step, const int32_t NToAs, const int32_t NFBasis, const int32_t BLRefP){
+
+				const int i = blockDim.x*blockIdx.x + threadIdx.x;
+
+				if(i < NToAs){
+
+					int32_t c = 0;
+
 					PriorLike[i] = 0;
 
 					double Amp = pow(10.0, 2*Amps[i]);
+					double Spec = Specs[i];
+
+					Amps[i] = 0;
+					Specs[i] = 0;
 
 					for(c = 0; c < NFBasis; c++){
 
-						double freq = ((c+1.0)/NFBasis)/BLRefFreq;
-						double power = Amp*pow(freq, -Specs[i]);
-						double pdet = 0.5*log(power*power);
+						double freq = ((c+1.0)/BLRefP);
+						double power = Amp*pow(freq, -Spec);
+						double pdet = 0.5*log(power);
 
-						PriorLike[i] += 0.5*BaseLineNoise[i*2*NFBasis+c]*BaseLineNoise[i*2*NFBasis+c]/power + pdet;
-						PriorLike[i] += 0.5*BaseLineNoise[i*2*NFBasis+c+NFBasis]*BaseLineNoise[i*2*NFBasis+c+NFBasis]/power + pdet;
+						PriorLike[i] += 0.5*BaselineNoise[i*2*NFBasis+c]*BaselineNoise[i*2*NFBasis+c]/power + pdet;
+						PriorLike[i] += 0.5*BaselineNoise[i*2*NFBasis+c+NFBasis]*BaselineNoise[i*2*NFBasis+c+NFBasis]/power + pdet;
 
-						AmpGrads[i] += -log(10.0)*BaseLineNoise[i*2*NFBasis+c]*BaseLineNoise[i*2*NFBasis+c]/power;
-						AmpGrads[i] += -log(10.0)*BaseLineNoise[i*2*NFBasis+c+NFBasis]*BaseLineNoise[i*2*NFBasis+c+NFBasis]/power;
+						Amps[i] += log(10.0)*(-BaselineNoise[i*2*NFBasis+c]*BaselineNoise[i*2*NFBasis+c]/power + 1);
+						Amps[i] += log(10.0)*(-BaselineNoise[i*2*NFBasis+c+NFBasis]*BaselineNoise[i*2*NFBasis+c+NFBasis]/power + 1);
 
-						SpecGrads[i] += log(freq)*BaseLineNoise[i*2*NFBasis+c]*BaseLineNoise[i*2*NFBasis+c]/power;
-				                SpecGrads[i] += log(freq)*BaseLineNoise[i*2*NFBasis+c+NFBasis]*BaseLineNoise[i*2*NFBasis+c+NFBasis]/power;						
+						Specs[i] += 0.5*log(freq)*(BaselineNoise[i*2*NFBasis+c]*BaselineNoise[i*2*NFBasis+c]/power - 1);
+				                Specs[i] += 0.5*log(freq)*(BaselineNoise[i*2*NFBasis+c+NFBasis]*BaselineNoise[i*2*NFBasis+c+NFBasis]/power - 1);						
 
-						double BLNGrad = -BaseLineNoise[i*2*NFBasis+c]*NResVec[i*2*NFBasis+c];
+						BaselineNoise[i*2*NFBasis+c] = -NResVec[i*2*NFBasis+c] + BaselineNoise[i*2*NFBasis+c]/power;
 
-						BaseLineNoise[i*2*NFBasis+c] = BLNGrad;
-
-						BLNGrad = -BaseLineNoise[i*2*NFBasis+c+NFBasis]*NResVec[i*2*NFBasis+c+NFBasis];
-
-						BaseLineNoise[i*2*NFBasis+c+NFBasis] = BLNGrad;
+						BaselineNoise[i*2*NFBasis+c+NFBasis] = -NResVec[i*2*NFBasis+c+NFBasis] + BaselineNoise[i*2*NFBasis+c+NFBasis]/power;
 						
 						
 					}
@@ -390,6 +466,8 @@ class Likelihood(object):
 			self.GPUBinTimes = mod.get_function("BinTimes")
 			self.GPUPrepLikelihood = mod.get_function("PrepLikelihood")
 			self.GPUScatter = mod.get_function("Scatter")
+			self.GPUGetBaselineRes = mod.get_function("getBaselineNoiseRes")
+			self.GPUGetBaselineGrads = mod.get_function("getBaselineNoiseRes2")
 
 
 	import time, sys
@@ -1432,7 +1510,7 @@ class Likelihood(object):
 				ccount += self.MaxCoeff[comp]
 
 
-	def PreComputeFFTShapelets(self, interpTime = 1, MeanBeta = 0.1, ToPickle = False, FromPickle = False, doplot = False):
+	def PreComputeFFTShapelets(self, interpTime = 1, MeanBeta = 0.1, ToPickle = False, FromPickle = False, doplot = False, useNFBasis = 0):
 
 
 		print("Calculating Shapelet Interpolation Matrix : ", interpTime, MeanBeta);
@@ -1537,7 +1615,10 @@ class Likelihood(object):
 			#InterpJitterMatrix = np.array(InterpJitterMatrix)
 			print("\nFinished Computing Interpolated Profiles")
 
-			self.NFBasis = upperindex - 1
+			if(useNFBasis > 0):
+				self.NFBasis = useNFBasis
+			else:
+				self.NFBasis = upperindex - 1
 
 			self.InterpFBasis = np.zeros([numtointerpolate, self.NFBasis*2, self.TotCoeff])
 			self.InterpJBasis = np.zeros([numtointerpolate, self.NFBasis*2, self.TotCoeff])
@@ -1774,6 +1855,10 @@ class Likelihood(object):
 		DenseParams = self.DenseParams
 		hess_dense = np.zeros([DenseParams,DenseParams])
 
+		if(self.incBaselineNoise == True):
+			self.BLNHess = np.zeros([self.NToAs, self.BaselineNoiseParams, self.BaselineNoiseParams])
+			self.BLNEigM = np.zeros([self.NToAs, self.BaselineNoiseParams, self.BaselineNoiseParams])
+
 		LinearSize = self.LinearParams
 
 		#####################Get Parameters####################################
@@ -1799,13 +1884,13 @@ class Likelihood(object):
 			ShapeAmps=np.zeros([self.TotCoeff, self.EvoNPoly+1])
 			ShapeAmps[0][0] = 1
 			ShapeAmps[1:]=self.MLParameters[self.ParamDict['Profile'][2]].reshape([NCoeff,(self.EvoNPoly+1)])
-		
+	
 		JitterSignal = np.zeros(self.NToAs)
 
 		if(self.incEQUAD == True):
 			EQUADSignal = self.MLParameters[self.ParamDict['EQUADSignal'][2]]
 			EQUADPriors  = 10.0**self.MLParameters[self.ParamDict['EQUADPrior'][2]]
-		
+	
 			for i in range(self.NumEQPriors):
 				EQIndicies = np.where(self.EQUADInfo==i)[0]
 				Prior = EQUADPriors[i]
@@ -1816,19 +1901,23 @@ class Likelihood(object):
 		if(self.incECORR == True):
 			ECORRSignal = copy.copy(self.MLParameters[self.ParamDict['ECORRSignal'][2]])
 			ECORRPriors  = 10.0**self.MLParameters[self.ParamDict['ECORRPrior'][2]]
-		
+	
 			for i in range(self.NumECORRPriors):
 				ECORRIndicies = np.where(self.ECORRInfo==i)[0]
 				Prior = ECORRPriors[i]
 				if(self.ECORRModel[i] == -1 or self.ECORRModel[i] == 0):
 					ECORRSignal[ECORRIndicies] *= Prior
-		
+	
 			JitterSignal += ECORRSignal[self.EpochIndex]
 
 		if(self.incScatter == True):
 			ScatterFreqScale = self.MLParameters[self.ParamDict['ScatterFreqScale'][2]]
 			ScatteringParameters = 10.0**self.MLParameters[self.ParamDict['Scattering'][2]]
 
+		if(self.incBaselineNoise == True):
+
+			BaselineNoisePriorAmps  = copy.copy(self.MLParameters[self.ParamDict['BaselineNoiseAmpPrior'][2]])
+			BaselineNoisePriorSpecs  = copy.copy(self.MLParameters[self.ParamDict['BaselineNoiseSpecPrior'][2]])
 
 
 		xS = self.ShiftedBinTimes-Phase*self.ReferencePeriod-JitterSignal
@@ -1841,7 +1930,7 @@ class Likelihood(object):
 		InterpSize = np.shape(self.InterpFBasis)[0]
 
 
-		
+	
 		xS = ( xS + self.FoldingPeriods/2) % (self.FoldingPeriods ) - self.FoldingPeriods/2
 
 		InterpBins = (np.floor(-xS%(OneBin)/self.InterpolatedTime+0.5)).astype(int)%InterpSize
@@ -1884,7 +1973,7 @@ class Likelihood(object):
 				ISS = 1.0/(self.psr.ssbfreqs()[i]**ScatterFreqScale/self.ScatterRefFreq**(ScatterFreqScale))
 				ISS2 = 1.0/(self.psr.ssbfreqs()[i]**ScatterFreqScale/10.0**(9.0*ScatterFreqScale))
 				#ISS = 1.0/((self.psr.ssbfreqs()[i]**ScatterFreqScale)/(self.ScatterRefFreq**(ScatterFreqScale)))
-				print i, self.psr.freqs[i], ISS, ISS2, tau*ISS
+				#print i, self.psr.freqs[i], ISS, ISS2, tau*ISS
 				RConv, IConv = self.ConvolveExp(f, tau*ISS)
 
 				RConfProf = RConv*s[i][:self.NFBasis] - IConv*s[i][self.NFBasis:]
@@ -1952,6 +2041,7 @@ class Likelihood(object):
 
 
 			Res=RollData-PSignal
+
 			RR = np.dot(Res, Res)
 
 			if(ProfileNoise[i] == None):		
@@ -1960,31 +2050,120 @@ class Likelihood(object):
 			else:
 				MLSigma = ProfileNoise[i]
 
-			like += 0.5*RR/MLSigma/MLSigma + 0.5*2*self.NFBasis*np.log(MLSigma*MLSigma)
-			chisq += 0.5*RR/MLSigma/MLSigma
-			detN += 0.5*2*self.NFBasis*np.log(MLSigma*MLSigma)
+			Noise = np.ones(2*self.NFBasis)*MLSigma**2
+	
 
-			print i, MLAmp, MLSigma, chisq, detN, like
+			if(self.incBaselineNoise == True):
+
+                                BLRefF = self.BaselineNoiseRefFreq
+                                BLNFreqs = np.zeros(2*self.NFBasis)
+                                BLNFreqs[:self.NFBasis] = (np.linspace(1,self.NFBasis,self.NFBasis)/BLRefF)
+                                BLNFreqs[self.NFBasis:] = (np.linspace(1,self.NFBasis,self.NFBasis)/BLRefF)
+
+                                Amp=10.0**(2*BaselineNoisePriorAmps[i])
+                                Spec = BaselineNoisePriorSpecs[i]
+                                BLNPower = Amp*pow(BLNFreqs, -Spec)
+
+				BLNPower[self.NFBasis-5:self.NFBasis] = 0
+				BLNPower[-5:] = 0
+
+				Noise += BLNPower
+
+			
+			MNM = np.dot(s[i], s[i]/Noise)
+			dNM = np.dot(RollData, s[i]/Noise)
+
+			if(ProfileAmps[i] == None):
+				MLAmp = dNM/MNM
+				self.MLParameters[self.ParamDict['PAmps'][2]][i] = MLAmp
+
+
+			like += 0.5*np.sum(Res*Res/Noise) + 0.5*np.sum(np.log(Noise))
+			chisq += 0.5*np.sum(Res*Res/Noise)
+			detN += 0.5*np.sum(np.log(Noise))
+
+			#print i, MLAmp, MLSigma, chisq, detN, like
 
 			if(self.fitPAmps == True):
 				index=self.ParamDict['PAmps'][0]+i
 				x0[index] = MLAmp
-				cov_diag[index] = MNM/(MLSigma*MLSigma)
+				cov_diag[index] = MNM
 
 
 			if(self.fitPNoise == True):
 				index=self.ParamDict['PNoise'][0]+i
 				x0[index] = MLSigma
-				cov_diag[index] = 3*RR/(MLSigma*MLSigma*MLSigma*MLSigma) - 2.0*self.NFBasis/(MLSigma*MLSigma)
+				cov_diag[index] = np.sum(-2*MLSigma**2/Noise**2 + 1.0/Noise + 4*MLSigma**2*Res**2/Noise**3 - Res**2/Noise**2)
+				#3*RR/(MLSigma*MLSigma*MLSigma*MLSigma) - 2.0*self.NFBasis/(MLSigma*MLSigma)
 
 
+			BLNIndex = 0
+			if(self.fitBaselineNoiseAmpPrior == True):
+			
+				Top = np.log(10)*BLNPower
+				T1 = -2*Top**2/Noise**2 
+				T2 = 2*Top*np.log(10.0)/Noise
+				T3 = 4*Top**2*Res**2/Noise**3
+				T4 = -2*Top*np.log(10.0)*Res**2/Noise**2
+			
+				HTerm = np.sum(T1 + T2 + T3 + T4)
+	
+				if(HTerm < 0):
+					HTerm = 5.0
+				
+				#print i, HTerm
+				index=self.ParamDict['BaselineNoiseAmpPrior'][0]+i
+				x0[index] = -1
+				cov_diag[index] = HTerm
+
+				self.BLNHess[i,BLNIndex, BLNIndex]  =  cov_diag[index]
+
+				BLNIndex += 1
+
+
+			if(self.fitBaselineNoiseSpecPrior == True):
+		
+                                Top = np.log(BLNFreqs)*BLNPower
+                                T1 = -0.5*Top**2/Noise**2 
+                                T2 = 0.5*Top*np.log(BLNFreqs)/Noise
+                                T3 = Top**2*Res**2/Noise**3
+                                T4 = -0.5*Top*np.log(BLNFreqs)*Res**2/Noise**2
+
+                                HTerm = np.sum(T1 + T2 + T3 + T4)
+
+                                if(HTerm < 0):
+                                        HTerm = 5.0
+
+				index=self.ParamDict['BaselineNoiseSpecPrior'][0]+i
+				x0[index] = 4
+				cov_diag[index] = HTerm
+
+
+
+				self.BLNHess[i,BLNIndex, BLNIndex]  = cov_diag[index]
+
+				if(self.fitBaselineNoiseAmpPrior == True):
+					
+	                                Top = BLNPower
+					T1 =  Top**2*np.log(10.0)*np.log(BLNFreqs)/Noise**2
+					T2 = -Top*np.log(10.0)*np.log(BLNFreqs)/Noise
+					T3 = -2*Top**2*Res**2*np.log(10.0)*np.log(BLNFreqs)/Noise**3
+					T4 =  Top*np.log(10.0)*np.log(BLNFreqs)*Res**2/Noise**2
+					
+					self.BLNHess[i, -1, -2]  =  np.sum(T1 + T2 + T3 + T4)
+					self.BLNHess[i, -2, -1]  =  np.sum(T1 + T2 + T3 + T4)
+
+					
+
+
+				
 
 			#Make Matrix for Linear Parameters
 
 			HessMatrix = np.zeros([LinearSize, 2*self.NFBasis])
 
 
-			PhaseScale = -1*MLAmp/MLSigma
+			PhaseScale = -1*MLAmp/np.sqrt(Noise)
 			LinCount = 0
 
 			for key in self.ParamDict.keys():
@@ -1992,7 +2171,7 @@ class Likelihood(object):
 
 					#Hessian for Profile Amp (if dense)
 					if(key == 'PAmps' and self.fitPAmps == True and self.DensePAmps == True):
-						HessMatrix[LinCount,:] = s[i]/MLSigma
+						HessMatrix[LinCount,:] = s[i]/np.sqrt(Noise)
 						LinCount += 1
 
 					if(key == 'EQUADSignal'and self.fitEQUADSignal == True):
@@ -2008,7 +2187,7 @@ class Likelihood(object):
 							HessMatrix[LinCount, :] = j[i]*PhaseScale
 
 						LinCount += 1
-		
+	
 					if(key == 'ECORRSignal'and self.fitECORRSignal == True):
 						EpochIndex = self.EpochIndex[i]
 						ECORRIndex = np.int(self.ECORRInfo[EpochIndex])
@@ -2045,7 +2224,7 @@ class Likelihood(object):
 
 						for c in range(1, self.TotCoeff):
 							for p in range(self.EvoNPoly+1):
-								HessMatrix[LinCount, :] = fvals[p]*ShapeBasis[:,c]*MLAmp/MLSigma
+								HessMatrix[LinCount, :] = fvals[p]*ShapeBasis[:,c]*MLAmp/np.sqrt(Noise)
 								LinCount += 1
 
 
@@ -2067,11 +2246,11 @@ class Likelihood(object):
 					if(key1 == 'PAmps' or key1 == 'EQUADSignal'): 
 						index1 += i
 						Np1 = 1
-		
+	
 					if(key1 == 'ECORRSignal'):
 						index1 += self.EpochIndex[i]
 						Np1 = 1
-		
+	
 					#print "param1: ", key1, Np1, index1
 					hess_dense[index1:index1+Np1, index1:index1+Np1] += OneHess[LinCount1:LinCount1+Np1, LinCount1:LinCount1+Np1]
 					cov_diag[index1+self.DiagParams:index1+Np1+self.DiagParams] +=  DiagHess[LinCount1:LinCount1+Np1]
@@ -2082,22 +2261,22 @@ class Likelihood(object):
 						if(self.ParamDict[key2][5] == 1):
 							Np2 = self.ParamDict[key2][1] - self.ParamDict[key2][0]
 							index2 = self.ParamDict[key2][0] - self.DiagParams
-	
+
 							if(key2 == 'PAmps' or key2 == 'EQUADSignal'): 
 								index2 += i
 								Np2 = 1
-				
-								
+			
+							
 							if(key2 == 'ECORRSignal'):
 								index2 += self.EpochIndex[i]
 								Np2= 1
-	
+
 							#print "param2: ", key2, Np2, LinCount1, LinCount2, index1, index2, Np1
 							hess_dense[index1: index1+Np1, index2: index2+Np2] += OneHess[LinCount1: LinCount1+Np1,  LinCount2: LinCount2+Np2]
 							hess_dense[index2: index2+Np2, index1: index1+Np1] += OneHess[LinCount2: LinCount2+Np2,  LinCount1: LinCount1+Np1]
 
 							LinCount2 += Np2
-	
+
 					LinCount1 += Np1
 
 			######################Add any priors to the hessian######################
@@ -2158,20 +2337,20 @@ class Likelihood(object):
 
 				if(self.EQUADModel[EQIndex] == -1):
 					hess_dense[index,index]  += 15.0/np.sum(self.EQUADInfo==EQIndex)
-	
+
 			if(self.fitECORRPrior == True):
-		
+	
 				EpochIndex = self.EpochIndex[i]
 				ECORRIndex = np.int(self.ECORRInfo[EpochIndex])
 				index = self.ParamDict['ECORRPrior'][0] + ECORRIndex - self.DiagParams
 				#print i, EpochIndex, ECORRIndex, index, np.shape(hess_dense),15.0/np.sum(self.ECORRInfo==ECORRIndex)/len(self.ChansPerEpoch[EpochIndex])
-		
+	
 				if(self.ECORRModel[ECORRIndex] == -1):
 					hess_dense[index,index]  += 15.0/np.sum(self.ECORRInfo==ECORRIndex)/len(self.ChansPerEpoch[EpochIndex])
-				
+			
 				if(self.ECORRModel[ECORRIndex] == 0):
 					hess_dense[index,index]  += 15.0/np.sum(self.ECORRInfo==ECORRIndex)/len(self.ChansPerEpoch[EpochIndex])
-				
+			
 				if(self.ECORRModel[ECORRIndex] == 1):
 					hess_dense[index,index]  += 100.0/np.sum(self.ECORRInfo==ECORRIndex)/len(self.ChansPerEpoch[EpochIndex])
 
@@ -2188,7 +2367,7 @@ class Likelihood(object):
 						ISS = 1.0/(self.psr.ssbfreqs()[i]**ScatterFreqScale/self.ScatterRefFreq**(ScatterFreqScale))
 						ISS2 = 1.0/(self.psr.ssbfreqs()[i]**ScatterFreqScale/10.0**(9.0*ScatterFreqScale))
 						#ISS = 1.0/((self.psr.ssbfreqs()[i]**ScatterFreqScale)/(self.ScatterRefFreq**(ScatterFreqScale)))
-						print i, self.psr.freqs[i], ISS, 1.0/ISS, ISS2, tau*ISS
+						#print i, self.psr.freqs[i], ISS, 1.0/ISS, ISS2, tau*ISS
 						RConv, IConv = self.ConvolveExp(f, tau*ISS)
 
 						RProf = NoScatterS[:self.NFBasis]*MLAmp
@@ -2197,7 +2376,7 @@ class Likelihood(object):
 						RConfProf = RConv*RProf - IConv*IProf
 						IConfProf = IConv*RProf + RConv*IProf
 
-						pnoise = MLSigma
+						pnoise = np.sqrt(Noise)[:self.NFBasis]
 
 						HessDenom = 1.0/(1.0 + tau**2*w**2*ISS**2)**3
 						GradDenom = 1.0/(1.0 + tau**2*w**2*ISS**2)**2
@@ -2237,14 +2416,15 @@ class Likelihood(object):
 
 
 						hess_dense[index+c,index+c] += np.sum(profhess)
-				
-
-
-				
-						if(self.ScatterCrossTerms[c] == -1):
-							hess_dense[index+c,index+c] = 100.0
 			
-				
+
+
+			
+						if(self.fitScatterStepSize != 0):
+							hess_dense[index+c,index+c] = 1.0/self.fitScatterStepSize**2
+							cov_diag[self.DiagParams+index+c] = 1.0/self.fitScatterStepSize**2
+		
+			
 						SLinCount = 0
 						for k1 in range(len(self.ParamDict.keys())):
 							key1 = self.ParamDict.keys()[k1]
@@ -2256,24 +2436,28 @@ class Likelihood(object):
 								if(key1 == 'PAmps' or key1 == 'EQUADSignal'): 
 									index1 += i
 									Np1 = 1
-	
+
 								if(key1 == 'ECORRSignal'):
 									index1 += self.EpochIndex[i]
 									Np1 = 1
-						
-						
-	
+					
+					
+
 								#print "param1: ", key1, Np1, index1
 								hess_dense[index1:index1+Np1, index+c] += -self.ScatterCrossTerms[c]*LinearScatterCross[SLinCount:SLinCount+Np1]
 								hess_dense[index+c, index1:index1+Np1] += -self.ScatterCrossTerms[c]*LinearScatterCross[SLinCount:SLinCount+Np1]
-				
-								SLinCount += Np1
 			
-				
-						cov_diag[self.DiagParams+index+c] += np.sum(profhess)
-				
-			if(self.fitScatterFreqScale == True):
+								SLinCount += Np1
 		
+			
+						cov_diag[self.DiagParams+index+c] += np.sum(profhess)
+
+						if(cov_diag[self.DiagParams+index+c] < 0):
+							cov_diag[self.DiagParams+index+c] = 2.0
+							hess_dense[index+c,index+c] = 2.0
+			
+			if(self.fitScatterFreqScale == True):
+	
 				index = self.ParamDict['ScatterFreqScale'][0] - self.DiagParams
 				hess_dense[index,index] = 5000.0
 				cov_diag[self.DiagParams+index] = 5000.0
@@ -2283,14 +2467,29 @@ class Likelihood(object):
 		if(diagonalGHS == False):		
 			#Now do EVD on the dense part of the matrix
 
+
+                        if(self.BaselineNoiseParams > 0):
+                                for i in range(self.NToAs):
+                                        V2, M2 = sl.eigh(self.BLNHess[i])
+                                        cov_diag[self.BLNList[i]] = V2
+                                        self.BLNEigM[i] = M2
+                                        if(np.min(V2) < 1):
+                                                print "Poorly formed BLN Hessian", i, " using diagonal approximation\n"
+						self.BLNEigM[i] = np.eye(self.BaselineNoiseParams)
+						DHess = copy.copy(self.BLNHess[i].diagonal())
+						#DHess.setflags(write=1)
+						DHess[DHess < 1] = 1
+						cov_diag[self.BLNList[i]] = DHess
+
+
 			if(self.DiagParams < self.n_params):
 				V, M = sl.eigh(hess_dense)
 
 				cov_diag[self.DiagParams:] = V
-		
+	
 				if(np.min(V) < 0):
 					print "Negative Eigenvalues: Poorly formed Hessian\n"
-				
+
 			else:
 				M = np.ones(1)
 				hess_dense = np.ones(1)
@@ -2299,15 +2498,31 @@ class Likelihood(object):
 
 			hess_dense = np.eye(np.shape(hess_dense)[0])
 			M = copy.copy(hess_dense)
-		
+
+			if(self.BaselineNoiseParams > 0):
+                                for i in range(self.NToAs):
+                                        self.BLNEigM[i] = np.eye(self.BaselineNoiseParams)
 	
+
 		#Complete the start point by filling in extra parameters
-	
+
 		for k in self.ParamDict.keys():
 			if(len(self.MLParameters[self.ParamDict[k][2]]) > 1):
 				self.MLParameters[self.ParamDict[k][2]] = np.float64(self.MLParameters[self.ParamDict[k][2]])
 			else:
 				self.MLParameters[self.ParamDict[k][2]] = np.array([np.float64(self.MLParameters[self.ParamDict[k][2]])])
+		
+		if(self.fitBaselineNoiseAmpPrior == True):
+			index=self.ParamDict['BaselineNoiseAmpPrior'][0]
+			x0[index:index + self.NToAs] = self.MLParameters[self.ParamDict['BaselineNoiseAmpPrior'][2]]
+		
+		if(self.fitBaselineNoiseSpecPrior == True):
+			index=self.ParamDict['BaselineNoiseSpecPrior'][0]
+			x0[index:index + self.NToAs] = self.MLParameters[self.ParamDict['BaselineNoiseSpecPrior'][2]]
+
+		if(self.fitPhase == True):
+			index=self.ParamDict['Phase'][0]
+			x0[index] = self.MLParameters[self.ParamDict['Phase'][2]][0]		
 
 		if(self.fitPhase == True):
 			index=self.ParamDict['Phase'][0]
@@ -2320,19 +2535,19 @@ class Likelihood(object):
 		if(self.fitProfile == True):
 			index=self.ParamDict['Profile'][0]
 			x0[index:index + NCoeff*(self.EvoNPoly+1)] = self.MLParameters[self.ParamDict['Profile'][2]]		
-	
+
 		if(self.fitEQUADSignal == True):
 			index=self.ParamDict['EQUADSignal'][0]
 			x0[index:index + self.NToAs] = self.MLParameters[self.ParamDict['EQUADSignal'][2]]
-		
+	
 		if(self.fitEQUADPrior == True):
 			index=self.ParamDict['EQUADPrior'][0]
 			x0[index:index + self.NumEQPriors] = self.MLParameters[self.ParamDict['EQUADPrior'][2]]
-		
+	
 		if(self.fitECORRSignal == True):
 			index=self.ParamDict['ECORRSignal'][0]
 			x0[index:index + self.NumEpochs] = self.MLParameters[self.ParamDict['ECORRSignal'][2]]
-		
+	
 		if(self.fitECORRPrior == True):
 			index=self.ParamDict['ECORRPrior'][0]
 			x0[index:index + self.NumECORRPriors] = self.MLParameters[self.ParamDict['ECORRPrior'][2]]
@@ -2340,14 +2555,17 @@ class Likelihood(object):
 		if(self.fitScatter == True):
 			index=self.ParamDict['Scattering'][0]
 			x0[index:index + self.NScatterEpochs] = self.MLParameters[self.ParamDict['Scattering'][2]]
-		
+	
 		if(self.fitScatterFreqScale == True):
 			index=self.ParamDict['ScatterFreqScale'][0]
 			x0[index] = self.MLParameters[self.ParamDict['ScatterFreqScale'][2]]
 
-	
-			
+
+		
 		return x0, cov_diag, M, hess_dense
+
+
+
 
 
 	def ConvolveExp(self, f, tau, returngrad=False, returnComp = False):
@@ -2508,12 +2726,26 @@ class Likelihood(object):
 
 		#Send relevant parameters to physical coordinates for likelihood
 
+		if(self.BaselineNoiseParams > 0):
+			for i in range(self.NToAs):
+				DenseParams = params[self.BLNList[i]]
+				PhysParams = np.dot(self.BLNEigM[i], DenseParams)
+				params[self.BLNList[i]] = PhysParams
+
 		if(self.DiagParams < ndims):
 			DenseParams = params[self.DiagParams:]
 			PhysParams = np.dot(self.EigM, DenseParams)
 			params[self.DiagParams:] = PhysParams
 
 		likeval, grad = self.GPULike(ndims, params)
+
+
+                if(self.BaselineNoiseParams > 0):
+                        for i in range(self.NToAs):
+                                DenseGrad = copy.copy(grad[self.BLNList[i]])
+                                PrincipleGrad = np.dot(self.BLNEigM[i].T, DenseGrad)
+                                grad[self.BLNList[i]] = PrincipleGrad
+
 
 		if(self.DiagParams < ndims):
 			DenseGrad = copy.copy(grad[self.DiagParams:])
@@ -2617,9 +2849,14 @@ class Likelihood(object):
 			if(self.fitScatter == True):
 				index=self.ParamDict['Scattering'][0]
 				ScatteringParameters = params[index:index+self.NScatterEpochs]
-				for i in range(self.NScatterEpochs):
-					if(ScatteringParameters[i] < -6):
-						like += -np.log(10.0)*(ScatteringParameters[i]+6)
+				if(self.fitScatterPrior == 0):
+					for i in range(self.NScatterEpochs):
+						if(ScatteringParameters[i] < -6):
+							like += -np.log(10.0)*(ScatteringParameters[i]+6)
+							grad[i+index] += -np.log(10.0)
+				if(self.fitScatterPrior == 1):
+                                        for i in range(self.NScatterEpochs):
+						like += -np.log(10.0)*(ScatteringParameters[i])
 						grad[i+index] += -np.log(10.0)
 				
 				ScatteringParameters = 10.0**ScatteringParameters
@@ -2727,32 +2964,38 @@ class Likelihood(object):
 
 			self.TimeJitterSignal_GPU = gpuarray.to_gpu(JitterSignal)	
 
+
 		if(self.incBaselineNoise == True):
-		
-			if(self.fitBaseLineNoisePrior == True):
-				index=self.ParamDict['BaseLineNoisePrior'][0]
-				BaseLineNoisePriorAmps  = params[index:index+self.NToAs]
-				BaseLineNoisePriorSpecs  = params[index+self.NToAs:index+2*self.NToAs]
+
+			if(self.fitBaselineNoiseAmpPrior == True):
+				index=self.ParamDict['BaselineNoiseAmpPrior'][0]
+				BaselineNoisePriorAmps  = params[index:index+self.NToAs]
 				for i in range(self.NToAs):
-					if(BaseLineNoisePriorAmps[i] < -10):
-						like += -np.log(10.0)*(BaseLineNoisePriorAmps[i]+10)
+					if(BaselineNoisePriorAmps[i] < -10 or self.BaselineNoisePrior[i] == 1 or self.FindML == True):
+						like += -np.log(10.0)*(BaselineNoisePriorAmps[i]+10)
 						grad[i+index] += -np.log(10.0)
 			else:
-				BaseLineNoisePriorAmps  = copy.copy(self.MLParameters[self.ParamDict['BaseLineNoisePrior'][2]])[:self.NToAs]
-				BaseLineNoisePriorSpecs  = copy.copy(self.MLParameters[self.ParamDict['BaseLineNoisePrior'][2]])[self.NToAs:2*self.NToAs]
+				BaselineNoisePriorAmps  = copy.copy(self.MLParameters[self.ParamDict['BaselineNoiseAmpPrior'][2]])
 
-			BaseLineNoisePriorAmps = 10.0**BaseLineNoisePriorAmps
-		
-			if(self.fitBaseLineNoiseSignal == True):
-				index=self.ParamDict['BaseLineNoiseSignal'][0]
-				BaseLineNoiseSignal = params[index:index+self.NToAs*2*self.NFBasis]
 
+			if(self.fitBaselineNoiseSpecPrior == True):
+				index=self.ParamDict['BaselineNoiseSpecPrior'][0]
+				BaselineNoisePriorSpecs  = params[index:index+self.NToAs]
+				for i in range(self.NToAs):
+                                        if(BaselineNoisePriorSpecs[i] < -7):
+                                                like += -(BaselineNoisePriorSpecs[i]+7)
+                                                grad[i+index] += -1
+					if(BaselineNoisePriorSpecs[i] > 10):
+                                                like += (BaselineNoisePriorSpecs[i]-10)
+                                                grad[i+index] += 1
 			else:
-				BaseLineNoiseSignal = copy.copy(self.MLParameters[self.ParamDict['BaseLineNoiseSignal'][2]])
-			
-			self.BaseLineNoiseSignal_GPU = gpuarray.to_gpu(BaseLineNoiseSignal)
-			self.BaseLineNoiseAmps_GPU = gpuarray.to_gpu(BaseLineNoisePriorAmps)
-			self.BaseLineNoiseSpecs_GPU = gpuarray.to_gpu(BaseLineNoisePriorSpecs)
+				BaselineNoisePriorSpecs  = copy.copy(self.MLParameters[self.ParamDict['BaselineNoiseSpecPrior'][2]])
+
+
+	
+			self.BaselineNoiseAmps_GPU = gpuarray.to_gpu(BaselineNoisePriorAmps)
+			self.BaselineNoiseSpecs_GPU = gpuarray.to_gpu(BaselineNoisePriorSpecs)
+
 			
 
 
@@ -2860,14 +3103,33 @@ class Likelihood(object):
 		grid_size = int(np.ceil(self.NToAs*self.NFBasis*2.0/block_size))	
 
 
-		self.GPUGetRes(self.gpu_ResVec, self.gpu_NResVec, self.gpu_RolledData, self.Signal_GPU, gpu_Amps, gpu_Noise, self.gpu_ToAIndex, 	self.gpu_SignalIndex, TotBins, grid=(grid_size,1), block=(block_size,1,1))
+		if(self.incBaselineNoise == False):
 
-		cublas.cublasDgemmBatched(self.CUhandle, 'n','n', 1, 1, 2*self.NFBasis, alpha, self.ResVec_pointer.gpudata, 1, self.NResVec_pointer.gpudata, 2*self.NFBasis, beta, self.Chisqs_Pointer.gpudata, 1, self.NToAs)
+			self.GPUGetRes(self.gpu_ResVec, self.gpu_NResVec, self.gpu_RolledData, self.Signal_GPU, gpu_Amps, gpu_Noise, self.gpu_ToAIndex, 	self.gpu_SignalIndex, TotBins, grid=(grid_size,1), block=(block_size,1,1))
 
-		ChisqVec = self.Chisqs_GPU.get()[:,0,0]
-		gpu_Chisq=np.sum(ChisqVec)
-		like += 0.5*gpu_Chisq + 0.5*2*self.NFBasis*np.sum(np.log(ProfileNoise))
 
+			cublas.cublasDgemmBatched(self.CUhandle, 'n','n', 1, 1, 2*self.NFBasis, alpha, self.ResVec_pointer.gpudata, 1, self.NResVec_pointer.gpudata, 2*self.NFBasis, beta, self.Chisqs_Pointer.gpudata, 1, self.NToAs)
+
+			ChisqVec = self.Chisqs_GPU.get()[:,0,0]
+			gpu_Chisq=np.sum(ChisqVec)
+			like += 0.5*gpu_Chisq + 0.5*2*self.NFBasis*np.sum(np.log(ProfileNoise))
+
+		else:
+
+
+			self.GPUGetBaselineRes(self.gpu_ResVec, self.gpu_NResVec, self.gpu_RolledData, self.Signal_GPU, gpu_Amps, gpu_Noise, self.gpu_ToAIndex, self.gpu_SignalIndex, TotBins, np.int32(self.NFBasis), self.BaselineNoiseAmps_GPU, self.BaselineNoiseSpecs_GPU, self.BaselineNoiseLike_GPU, np.int32(self.BaselineNoiseRefFreq), grid=(grid_size,1), block=(block_size,1,1))
+
+			cublas.cublasDgemmBatched(self.CUhandle, 'n','n', 1, 1, 2*self.NFBasis, alpha, self.ResVec_pointer.gpudata, 1, self.NResVec_pointer.gpudata, 2*self.NFBasis, beta, self.Chisqs_Pointer.gpudata, 1, self.NToAs)
+
+			ChisqVec = self.Chisqs_GPU.get()[:,0,0]
+			gpu_Chisq=np.sum(ChisqVec)
+
+                        block_size = 128
+                        grid_size = int(np.ceil(self.NToAs*1.0/block_size))
+                        self.GPUGetBaselineGrads(self.gpu_ResVec, self.gpu_NResVec, self.gpu_RolledData, self.Signal_GPU, gpu_Amps, gpu_Noise, self.gpu_ToAIndex, self.gpu_SignalIndex, TotBins, np.int32(self.NFBasis), self.BaselineNoiseAmps_GPU, self.BaselineNoiseSpecs_GPU, self.BaselineNoiseLike_GPU, np.int32(self.BaselineNoiseRefFreq), np.int32(self.NToAs), grid=(grid_size,1), block=(block_size,1,1))
+
+			NDet  = np.sum(self.BaselineNoiseLike_GPU.get())
+			like += 0.5*gpu_Chisq + 0.5*NDet
 
 
 
@@ -2880,11 +3142,111 @@ class Likelihood(object):
 			grad[index:index+self.NToAs] = -1*self.AmpGrads_GPU.get()[:,0,0]
 
 		if(self.fitPNoise == True):
+
 			index=self.ParamDict['PNoise'][0]
-			grad[index:index+self.NToAs] = (-ChisqVec+2*self.NFBasis)/np.sqrt(ProfileNoise)
 
-	
+			if(self.incBaselineNoise == False):				
+				grad[index:index+self.NToAs] = (-ChisqVec+2*self.NFBasis)/np.sqrt(ProfileNoise)
+			else:
+				grad[index:index+self.NToAs] = gpu_Noise.get()
+				'''
+				RVec = self.gpu_ResVec.get()[:,:,0]
+				NVec = self.gpu_NResVec.get()[:,0,:]
 
+				for i in range(self.NToAs):
+					BLRefF = self.BaselineNoiseRefFreq
+		                        BLNFreqs = np.zeros(2*self.NFBasis)
+		                        BLNFreqs[:self.NFBasis] = (np.linspace(1,self.NFBasis,self.NFBasis)/BLRefF)
+		                        BLNFreqs[self.NFBasis:] = (np.linspace(1,self.NFBasis,self.NFBasis)/BLRefF)
+
+					Amp=10.0**(2*BaselineNoisePriorAmps[i])
+					Spec = BaselineNoisePriorSpecs[i]
+					BLNPower = Amp*pow(BLNFreqs, -Spec)
+
+					BLNPower[self.NFBasis-5:self.NFBasis] = 0
+					BLNPower[-5:] = 0
+
+					NGrad = np.sum((np.sqrt(ProfileNoise[i])/(BLNPower + ProfileNoise[i]))*(1 - RVec[i]*NVec[i]))
+
+					grad[index+i] = NGrad
+				'''
+
+		if(self.fitBaselineNoiseAmpPrior == True or self.fitBaselineNoiseSpecPrior == True):
+
+
+			#block_size = 128
+			#grid_size = int(np.ceil(self.NToAs*1.0/block_size))
+
+			#self.GPUGetBaselineGrads(self.gpu_NResVec, self.BaselineNoiseSignal_GPU, self.BaselineNoiseAmps_GPU, self.BaselineNoiseSpecs_GPU, self.BaselineNoiseLike_GPU, Step, np.int32(self.NToAs), np.int32(self.NFBasis), np.int32(self.BaselineNoiseRefFreq), grid=(grid_size,1), block=(block_size,1,1))
+
+
+			if(self.fitBaselineNoiseAmpPrior == True):
+
+				index=self.ParamDict['BaselineNoiseAmpPrior'][0]
+                                grad[index:index+self.NToAs] = self.BaselineNoiseAmps_GPU.get()
+				
+				'''
+				if(self.fitPNoise == False):
+					RVec = self.gpu_ResVec.get()[:,:,0]
+					NVec = self.gpu_NResVec.get()[:,0,:]
+
+				index=self.ParamDict['BaselineNoiseAmpPrior'][0]
+
+				for i in range(self.NToAs):
+					BLRefF = self.BaselineNoiseRefFreq
+                                        BLNFreqs = np.zeros(2*self.NFBasis)
+                                        BLNFreqs[:self.NFBasis] = (np.linspace(1,self.NFBasis,self.NFBasis)/BLRefF)
+                                        BLNFreqs[self.NFBasis:] = (np.linspace(1,self.NFBasis,self.NFBasis)/BLRefF)
+
+                                        Amp=10.0**(2*BaselineNoisePriorAmps[i])
+                                        Spec = BaselineNoisePriorSpecs[i]
+                                        BLNPower = Amp*pow(BLNFreqs, -Spec)
+
+                                        BLNPower[self.NFBasis-5:self.NFBasis] = 0
+                                        BLNPower[-5:] = 0
+
+					Top = np.log(10.0)*BLNPower
+
+                                        NGrad = np.sum((Top/(BLNPower + ProfileNoise[i]))*(1 - RVec[i]*NVec[i]))
+
+					grad[index+i] = NGrad
+				'''
+
+			if(self.fitBaselineNoiseSpecPrior == True):
+
+				index=self.ParamDict['BaselineNoiseSpecPrior'][0]
+				grad[index:index+self.NToAs] = self.BaselineNoiseSpecs_GPU.get()
+
+				'''
+                                if(self.fitPNoise == False and self.fitBaselineNoiseAmpPrior == False):
+                                        RVec = self.gpu_ResVec.get()[:,:,0]
+                                        NVec = self.gpu_NResVec.get()[:,0,:]
+
+				index=self.ParamDict['BaselineNoiseSpecPrior'][0]
+
+                                for i in range(self.NToAs):
+                                        BLRefF = self.BaselineNoiseRefFreq
+                                        BLNFreqs = np.zeros(2*self.NFBasis)
+                                        BLNFreqs[:self.NFBasis] = (np.linspace(1,self.NFBasis,self.NFBasis)/BLRefF)
+                                        BLNFreqs[self.NFBasis:] = (np.linspace(1,self.NFBasis,self.NFBasis)/BLRefF)
+
+                                        Amp=10.0**(2*BaselineNoisePriorAmps[i])
+                                        Spec = BaselineNoisePriorSpecs[i]
+                                        BLNPower = Amp*pow(BLNFreqs, -Spec)
+
+                                        BLNPower[self.NFBasis-5:self.NFBasis] = 0
+                                        BLNPower[-5:] = 0
+
+                                        Top = -0.5*np.log(BLNFreqs)*BLNPower
+
+                                        NGrad = np.sum((Top/(BLNPower + ProfileNoise[i]))*(1 - RVec[i]*NVec[i]))
+
+                                        grad[index+i] = NGrad
+				'''
+
+		#block_size = 128
+                #grid_size = int(np.ceil(self.NToAs*1.0/block_size))
+		#self.GPUGetBaselineGrads(self.gpu_ResVec, self.gpu_NResVec, self.gpu_RolledData, self.Signal_GPU, gpu_Amps, gpu_Noise, self.gpu_ToAIndex, self.gpu_SignalIndex, TotBins, np.int32(self.NFBasis), self.BaselineNoiseAmps_GPU, self.BaselineNoiseSpecs_GPU, self.BaselineNoiseLike_GPU, np.int32(self.BaselineNoiseRefFreq), np.int32(self.NToAs), grid=(grid_size,1), block=(block_size,1,1))	
 
 		####################Calculate Gradient for Phase Offset########################################
 
@@ -3021,6 +3383,9 @@ class Likelihood(object):
 		#	g[i] = grad[i]
 
 
+		#print "params: ", params
+		#print "grad: ", grad
+		#print "like", like
 
 		return like, grad
 
@@ -3283,7 +3648,8 @@ class Likelihood(object):
 		for i in range(ndim[0]):
 			g[i] = grad[i]
 
-
+		print "Params", p
+		print "grad:", g
 
 		return 
 
@@ -3299,6 +3665,12 @@ class Likelihood(object):
 			DenseParams = params[DiagParams:]
 			PhysParams = np.dot(self.EigM, DenseParams)
 			params[DiagParams:] = PhysParams
+
+                if(self.BaselineNoiseParams > 0):
+                        for i in range(self.NToAs):
+                                DenseParams = params[self.BLNList[i]]
+                                PhysParams = np.dot(self.BLNEigM[i], DenseParams)
+                                params[self.BLNList[i]] = PhysParams
 
 		self.GHSoutfile.write(" ".join(map(lambda x: str(x), params[self.ParametersToWrite]))+" ")
 	
@@ -3484,9 +3856,10 @@ class Likelihood(object):
 		self.TimeJitterSignal_GPU = gpuarray.zeros(self.NToAs, np.float64)
 
 		if(self.incBaselineNoise == True):
-			self.BaseLineNoiseSignal_GPU = gpuarray.zeros(self.NToAs*2*self.NFBasis, np.float64)
-			self.BaseLineNoiseAmps_GPU = gpuarray.zeros(self.NToAs, np.float64)
-			self.BaseLineNoiseSpecs_GPU = gpuarray.zeros(self.NToAs, np.float64)
+		
+			self.BaselineNoiseAmps_GPU = gpuarray.zeros(self.NToAs, np.float64)
+			self.BaselineNoiseSpecs_GPU = gpuarray.zeros(self.NToAs, np.float64)
+			self.BaselineNoiseLike_GPU  = gpuarray.zeros(self.NToAs, np.float64)
 
 		self.InitGPU = False
 
@@ -3511,12 +3884,15 @@ class Likelihood(object):
 		self.incPNoise = True
 		self.fitPNoise = Fit
 
+                if(Fit == False):
+                        write = False
+
 		pstart, pstop = len(self.parameters), len(self.parameters)+self.NToAs
 		MLpos = len(self.MLParameters)
 		wstart, wstop = len(self.ParametersToWrite), len(self.ParametersToWrite)+self.NToAs
 		AmIInLinear = 0
 
-		self.ParamDict['PNoise'] = (pstart, pstop, MLpos, wstart, wstop, AmIInLinear)
+		self.ParamDict['PNoise'] = (pstart, pstop, MLpos, wstart, wstop, AmIInLinear, Fit, write)
 
 		if(Fit == True):
 			self.DiagParams += self.NToAs
@@ -3539,12 +3915,15 @@ class Likelihood(object):
 		AmIInLinear = 0
 		if(Dense == True and Fit == True):	
 			AmIInLinear = 1
+
+                if(Fit == False):
+                        write = False
 	
 		pstart, pstop = len(self.parameters), len(self.parameters)+self.NToAs
 		MLpos = len(self.MLParameters)
 		wstart, wstop = len(self.ParametersToWrite), len(self.ParametersToWrite)+self.NToAs
 	
-		self.ParamDict['PAmps'] = (pstart, pstop, MLpos, wstart, wstop, AmIInLinear)
+		self.ParamDict['PAmps'] = (pstart, pstop, MLpos, wstart, wstop, AmIInLinear, Fit, write)
 
 		if(Fit == True):
 			if(self.DensePAmps == False):
@@ -3568,6 +3947,9 @@ class Likelihood(object):
 	def addPhase(self, Fit = True, ML = None, write=True):
 		self.incPhase = True
 		self.fitPhase = Fit
+
+                if(Fit == False):
+                        write = False
 	
 		pstart, pstop = len(self.parameters), len(self.parameters)+1
 		MLpos = len(self.MLParameters)
@@ -3576,7 +3958,7 @@ class Likelihood(object):
 		if(Fit == True):	
 			AmIInLinear = 1
 	
-		self.ParamDict['Phase'] = (pstart, pstop, MLpos, wstart, wstop, AmIInLinear)
+		self.ParamDict['Phase'] = (pstart, pstop, MLpos, wstart, wstop, AmIInLinear, Fit, write)
 
 		if(Fit == True):	
 			self.DenseParams += 1
@@ -3596,6 +3978,9 @@ class Likelihood(object):
 
 		self.incLinearTM = True
 		self.fitLinearTM = Fit
+
+                if(Fit == False):
+                        write = False
 	
 		pstart, pstop = len(self.parameters), len(self.parameters)+self.numTime
 		MLpos = len(self.MLParameters)
@@ -3604,7 +3989,7 @@ class Likelihood(object):
 		if(Fit == True):	
 			AmIInLinear = 1
 	
-		self.ParamDict['LinearTM'] = (pstart, pstop, MLpos, wstart, wstop, AmIInLinear)
+		self.ParamDict['LinearTM'] = (pstart, pstop, MLpos, wstart, wstop, AmIInLinear, Fit, write)
 
 		if(Fit == True):	
 			self.DenseParams += self.numTime
@@ -3623,6 +4008,9 @@ class Likelihood(object):
 
 		self.incProfile = True
 		self.fitProfile = Fit
+
+		if(Fit == False):
+			write = False
 	
 		pstart, pstop = len(self.parameters), len(self.parameters)+(self.TotCoeff-1)*(self.EvoNPoly+1)
 		MLpos = len(self.MLParameters)
@@ -3631,7 +4019,7 @@ class Likelihood(object):
 		if(Fit == True):	
 			AmIInLinear = 1
 	
-		self.ParamDict['Profile'] = (pstart, pstop, MLpos, wstart, wstop, AmIInLinear)
+		self.ParamDict['Profile'] = (pstart, pstop, MLpos, wstart, wstop, AmIInLinear, Fit, write)
 
 		if(Fit == True):	
 			self.DenseParams += (self.TotCoeff-1)*(self.EvoNPoly+1)
@@ -3648,19 +4036,27 @@ class Likelihood(object):
 	
 		self.MLParameters.append(ML)
 
-	def addScatter(self, FitScatter = True, FitFreqScale = False, MLScatter = None, MLFreqScale = None, mode='parfile', writeScatter = True, writeFreqScale = True, RefFreq = 1):
+	def addScatter(self, FitScatter = True, FitFreqScale = False, MLScatter = None, MLFreqScale = None, mode='parfile', writeScatter = True, writeFreqScale = True, RefFreq = 1, Prior = 0, StepSize = 0):
 
 		self.incScatter = True
 		self.ScatterRefFreq = RefFreq*10.0**9
 		self.fitScatter = FitScatter
+		self.fitScatterPrior = Prior
+		self.fitScatterStepSize = StepSize
 		self.ScatterInfo = self.GetScatteringParams(mode = mode)
+
+                if(FitScatter == False):
+                        writeScatter = False
+
+                if(FitFreqScale == False):
+                        writeFreqScale = False
 	
 		pstart, pstop = len(self.parameters), len(self.parameters)+ self.NScatterEpochs
 		MLpos = len(self.MLParameters)
 		wstart, wstop = len(self.ParametersToWrite), len(self.ParametersToWrite)+ self.NScatterEpochs
 		AmIInLinear = 0
 	
-		self.ParamDict['Scattering'] = (pstart, pstop, MLpos, wstart, wstop, AmIInLinear)
+		self.ParamDict['Scattering'] = (pstart, pstop, MLpos, wstart, wstop, AmIInLinear, FitScatter, writeScatter)
 
 	
 		if(FitScatter == True):	
@@ -3685,7 +4081,7 @@ class Likelihood(object):
 		wstart, wstop = len(self.ParametersToWrite), len(self.ParametersToWrite) + 1
 		AmIInLinear = 0
 	
-		self.ParamDict['ScatterFreqScale'] = (pstart, pstop, MLpos, wstart, wstop, AmIInLinear)
+		self.ParamDict['ScatterFreqScale'] = (pstart, pstop, MLpos, wstart, wstop, AmIInLinear, FitFreqScale, writeFreqScale)
 
 	
 		if(FitFreqScale == True):	
@@ -3710,6 +4106,12 @@ class Likelihood(object):
 		self.EQUADModel = model
 	
 		self.EQUADInfo = self.GetEQUADParams(mode = mode, flag=flag)
+
+                if(FitSignal == False):
+                        writeSignal = False
+
+                if(FitPrior == False):
+                        writePrior = False
 	
 		pstart, pstop = len(self.parameters), len(self.parameters)+self.NToAs 
 		MLpos = len(self.MLParameters)
@@ -3718,7 +4120,7 @@ class Likelihood(object):
 		if(FitSignal == True):	
 			AmIInLinear = 1
 	
-		self.ParamDict['EQUADSignal'] = (pstart, pstop, MLpos, wstart, wstop, AmIInLinear)
+		self.ParamDict['EQUADSignal'] = (pstart, pstop, MLpos, wstart, wstop, AmIInLinear, FitSignal, writeSignal)
 	
 		if(FitSignal == True):	
 			self.DenseParams += self.NToAs
@@ -3738,7 +4140,7 @@ class Likelihood(object):
 		wstart, wstop = len(self.ParametersToWrite), len(self.ParametersToWrite)+self.NumEQPriors
 		AmIInLinear = 0
 	
-		self.ParamDict['EQUADPrior'] = (pstart, pstop, MLpos, wstart, wstop, AmIInLinear)
+		self.ParamDict['EQUADPrior'] = (pstart, pstop, MLpos, wstart, wstop, AmIInLinear, FitPrior, writePrior)
 
 				
 		if(FitPrior == True):	
@@ -3781,6 +4183,12 @@ class Likelihood(object):
 		self.ECORRModel = model
 	
 		self.ECORRInfo = self.GetECORRParams(mode = mode, flag=flag)
+
+		if(FitSignal == False):
+			writeSignal = False
+
+		if(FitPrior == False):
+			writePrior = False
 	
 		pstart, pstop = len(self.parameters), len(self.parameters)+self.NumEpochs
 		MLpos = len(self.MLParameters)
@@ -3789,7 +4197,7 @@ class Likelihood(object):
 		if(FitSignal == True):	
 			AmIInLinear = 1
 	
-		self.ParamDict['ECORRSignal'] = (pstart, pstop, MLpos, wstart, wstop, AmIInLinear)
+		self.ParamDict['ECORRSignal'] = (pstart, pstop, MLpos, wstart, wstop, AmIInLinear, FitSignal, writeSignal)
 	
 		if(FitSignal == True):	
 			self.DenseParams += self.NumEpochs
@@ -3809,7 +4217,7 @@ class Likelihood(object):
 		wstart, wstop = len(self.ParametersToWrite), len(self.ParametersToWrite)+self.NumECORRPriors
 		AmIInLinear = 0
 	
-		self.ParamDict['ECORRPrior'] = (pstart, pstop, MLpos, wstart, wstop, AmIInLinear)
+		self.ParamDict['ECORRPrior'] = (pstart, pstop, MLpos, wstart, wstop, AmIInLinear, FitPrior, writePrior)
 
 				
 		if(FitPrior == True):	
@@ -3846,60 +4254,90 @@ class Likelihood(object):
 
 		return ECORRParamList
 
-	def addBaselineNoise(self, FitSignal = True, FitPrior = True, MLSignal = None, MLPrior = None, model = None, writeSignal=True, writePrior=True):
+	def addBaselineNoise(self, FitAmpPrior = True, FitSpecPrior = True, MLAmpPrior = None, MLSpecPrior = None, writeAmpPrior=True, writeSpecPrior=True, BaselineNoiseRefFreq = 2, BaselineNoisePrior = None):
 
 		self.incBaselineNoise = True
-		self.fitBaselineNoiseSignal = FitSignal
-		self.fitBaselineNoisePrior = FitPrior
-		self.BaselineNoiseModel = model
+		self.fitBaselineNoiseAmpPrior = FitAmpPrior
+		self.fitBaselineNoiseSpecPrior = FitSpecPrior
+		self.BaselineNoiseRefFreq = BaselineNoiseRefFreq
 
-		pstart, pstop = len(self.parameters), len(self.parameters)+self.NToAs*self.NFBasis*2 
-		MLpos = len(self.MLParameters)
-		wstart, wstop = len(self.ParametersToWrite), len(self.ParametersToWrite)+self.NToAs*self.NFBasis*2 
-		AmIInLinear = 0
-		#if(FitSignal == True):	
-		#	AmIInLinear = 1
-
-		self.ParamDict['BaselineNoiseSignal'] = (pstart, pstop, MLpos, wstart, wstop, AmIInLinear)
-
-		if(FitSignal == True):	
-			self.DiagParams += self.NToAs*self.NFBasis*2 
-			self.LinearParams += self.NFBasis*2 
-			for i in range(self.NToAs):
-				for j in range(self.NFBasis*2):
-					if(writeSignal==True):
-						self.ParametersToWrite.append(len(self.parameters))
-				self.parameters.append("PBNSignal_"+str(i)+"_"+str(j))
-			
-		if(MLSignal == None):
-			self.MLParameters.append(np.zeros(self.NToAs*self.NFBasis*2))
+		if(BaselineNoisePrior == None):
+			self.BaselineNoisePrior = np.zeros(self.NToAs)
 		else:
-			self.MLParameters.append(MLSignal)
+			self.BaselineNoisePrior = BaselineNoisePrior
+
+		self.BaselineNoiseParams = 0
 			
-		pstart, pstop = len(self.parameters), len(self.parameters)+2*self.NToAs
+		pstart, pstop = len(self.parameters), len(self.parameters)+self.NToAs
 		MLpos = len(self.MLParameters)
-		wstart, wstop = len(self.ParametersToWrite), len(self.ParametersToWrite)+2*self.NToAs
+		wstart, wstop = len(self.ParametersToWrite), len(self.ParametersToWrite)+self.NToAs
 		AmIInLinear = 0
 
-		self.ParamDict['BaselineNoisePrior'] = (pstart, pstop, MLpos, wstart, wstop, AmIInLinear)
+		if(FitAmpPrior == False):
+			writeAmpPrior = False
+
+		self.ParamDict['BaselineNoiseAmpPrior'] = (pstart, pstop, MLpos, wstart, wstop, AmIInLinear, FitAmpPrior, writeAmpPrior)
 
 			
-		if(FitPrior == True):	
-			self.DiagParams += 2*self.NToAs
+		if(FitAmpPrior == True):	
+			self.DiagParams += self.NToAs
+			self.BaselineNoiseParams += 1
 			for i in range(self.NToAs):
-				if(writePrior==True):
+				if(writeAmpPrior==True):
 					self.ParametersToWrite.append(len(self.parameters))
 				self.parameters.append("BLNPriorA_"+str(i))
+
+	
+		if(MLAmpPrior == None):
+			MLP = np.ones(self.NToAs)
+			MLP[:self.NToAs] *= -1
+			self.MLParameters.append(MLP)
+		else:
+			self.MLParameters.append(MLAmpPrior)
+
+		pstart, pstop = len(self.parameters), len(self.parameters)+self.NToAs
+		MLpos = len(self.MLParameters)
+		wstart, wstop = len(self.ParametersToWrite), len(self.ParametersToWrite)+self.NToAs
+		AmIInLinear = 0
+
+		if(FitSpecPrior == False):
+			writeSpecPrior = False
+
+		self.ParamDict['BaselineNoiseSpecPrior'] = (pstart, pstop, MLpos, wstart, wstop, AmIInLinear, FitSpecPrior, writeSpecPrior)
+
+			
+		if(FitSpecPrior == True):	
+			self.DiagParams += self.NToAs
+			self.BaselineNoiseParams += 1
 			for i in range(self.NToAs):
-				if(writePrior==True):
+				if(writeSpecPrior==True):
 					self.ParametersToWrite.append(len(self.parameters))
 				self.parameters.append("BLNPriorS_"+str(i))
 	
-		if(MLPrior == None):
-			self.MLParameters.append(np.ones(self.NToAs)*-1)
-			self.MLParameters.append(np.ones(self.NToAs)*4)
+		if(MLSpecPrior == None):
+			MLP = np.ones(self.NToAs)*4
+			self.MLParameters.append(MLP)
 		else:
-			self.MLParameters.append(MLPrior)
+			self.MLParameters.append(MLSpecPrior)
+
+
+		self.BLNList = []
+	
+		if(self.BaselineNoiseParams > 0):
+			for i in range(self.NToAs):
+				oneP = np.zeros(self.BaselineNoiseParams)
+				sp = 0
+				if(self.fitBaselineNoiseAmpPrior == True):
+					index=self.ParamDict['BaselineNoiseAmpPrior'][0]
+					oneP[sp] = index+i
+					sp += 1
+				
+				if(self.fitBaselineNoiseSpecPrior == True):
+					index=self.ParamDict['BaselineNoiseSpecPrior'][0]
+					oneP[sp] = index+i
+				
+				self.BLNList.append(oneP.astype(np.int))
+
 	
 		return
 
@@ -4047,6 +4485,7 @@ class Likelihood(object):
 		self.ModelBats = newSec + self.BatCorrs - self.residuals/self.SECDAY
 		ProfileBinTimes = (self.ProfileStartBats - self.ModelBats)*self.SECDAY
 		self.ShiftedBinTimes = np.float64(np.array(ProfileBinTimes))
+		self.MeanPhase = 0
 
 
 	def UpdateBats(self):
@@ -4153,3 +4592,101 @@ class Likelihood(object):
 		if(outfile != None):
 			print "writing to:", self.root+'ScatterVals.dat'
 			np.savetxt(self.root+'ScatterVals.dat', ScatterVals)
+
+
+
+	def AddShapeCoeffs(self, NewNumCoeffs, interpTime = 1, useNFBasis = 0):
+
+		OldNumCoeff = self.TotCoeff
+
+		self.MaxCoeff = np.array(NewNumCoeffs)
+		self.TotCoeff = np.sum(self.MaxCoeff)
+
+
+		newShape = np.zeros([self.TotCoeff, 2])
+		newShape[:OldNumCoeff,:] = self.MLShapeCoeff
+		self.MLShapeCoeff = newShape
+
+		self.PreComputeFFTShapelets(interpTime = interpTime, MeanBeta = self.MeanBeta, doplot=False, useNFBasis = useNFBasis)
+		self.InitGPU = True
+
+
+	def LBFGSlikewrap(self, x):
+
+		AmpPrior = 0.1
+		p = self.startPoint + x*np.sqrt(1.0/np.abs(self.EigV))
+
+		l,g = self.GPULike(self.n_params, p)
+		
+		if(self.fitProfile == True):
+				index=self.ParamDict['Profile'][0]
+				ProfileAmps = p[index:index + (self.TotCoeff-1)*(self.EvoNPoly+1)][::self.EvoNPoly+1]
+				
+				
+				l += 0.5*np.sum(ProfileAmps**2/AmpPrior**2)
+		
+		return l
+
+
+	def LBFGSgradwrap(self, x):
+
+		AmpPrior = 0.1
+		p = self.startPoint + x*np.sqrt(1.0/np.abs(self.EigV))
+
+		l,g = self.GPULike(self.n_params, p)
+		
+		g = g*np.sqrt(1.0/np.abs(self.EigV))
+
+		if(self.fitProfile == True):
+			index=self.ParamDict['Profile'][0]
+			ProfileAmps = p[index:index + (self.TotCoeff-1)*(self.EvoNPoly+1)][::self.EvoNPoly+1]
+			ProfileScale = (np.sqrt(1.0/np.abs(self.EigV))[index:index + (self.TotCoeff-1)*(self.EvoNPoly+1)])[::self.EvoNPoly+1]
+					
+			AmpGrad = (ProfileScale/AmpPrior**2)*ProfileAmps
+			
+			g[index:index + (self.TotCoeff-1)*(self.EvoNPoly+1)][::self.EvoNPoly+1] += AmpGrad
+		
+		return g
+
+	def FindGlobalMaximum(self):
+
+		self.FindML = True
+		self.PhasePrior = 1e-0
+		self.startPoint, self.EigV, self.EigM, self.hess = self.calculateGHSHessian(diagonalGHS=True)
+
+		if(self.InitGPU == True):
+			self.init_gpu_arrays()
+		
+		print "Computing Global Maximum\n"	
+		r2=optimize.fmin_l_bfgs_b(self.LBFGSlikewrap, np.zeros(self.n_params), fprime=self.LBFGSgradwrap)
+
+		NumML=(self.startPoint + r2[0]*np.sqrt(1.0/np.abs(self.EigV)))
+
+		for k1 in range(len(self.ParamDict.keys())):
+			key1 = self.ParamDict.keys()[k1]
+			if(self.ParamDict[key1][6] == True):
+
+				Np1 = self.ParamDict[key1][1] - self.ParamDict[key1][0]
+				index1 = self.ParamDict[key1][0]
+				print "Updating:", k1, key1
+				self.MLParameters[self.ParamDict[key1][2]] = NumML[index1:index1+Np1]
+		
+		self.FindML = False
+
+	def UpdateStartPointFromChains(self, root = None, burnin=0):
+
+		if(root == None):
+			root = self.root
+			
+		chains=np.loadtxt(root).T
+		ML = chains.T[burnin:][np.argmax(chains[-1][burnin:])][:-1]
+		
+		for k1 in range(len(self.ParamDict.keys())):
+			key1 = self.ParamDict.keys()[k1]
+			if(self.ParamDict[key1][7] == True):
+		
+				Np1 = self.ParamDict[key1][1] - self.ParamDict[key1][0]
+				index1 = self.ParamDict[key1][0]
+				index2 = self.ParamDict[key1][3]
+				print "Updating from chains:", k1, key1, index1, index2
+				self.MLParameters[self.ParamDict[key1][2]] = ML[index2:index2+Np1]	
