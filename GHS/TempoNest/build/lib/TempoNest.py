@@ -2082,7 +2082,7 @@ class Likelihood(object):
 			chisq += 0.5*np.sum(Res*Res/Noise)
 			detN += 0.5*np.sum(np.log(Noise))
 
-			#print i, MLAmp, MLSigma, chisq, detN, like
+			print i, MLAmp, MLSigma, chisq, detN, like
 
 			if(self.fitPAmps == True):
 				index=self.ParamDict['PAmps'][0]+i
@@ -2111,10 +2111,11 @@ class Likelihood(object):
 				if(HTerm < 0):
 					HTerm = 5.0
 				
-				#print i, HTerm
+				print i, HTerm
 				index=self.ParamDict['BaselineNoiseAmpPrior'][0]+i
 				x0[index] = -1
 				cov_diag[index] = HTerm
+
 				self.BLNHess[i,BLNIndex, BLNIndex]  =  cov_diag[index]
 
 				BLNIndex += 1
@@ -3172,80 +3173,6 @@ class Likelihood(object):
 
 		if(self.fitBaselineNoiseAmpPrior == True or self.fitBaselineNoiseSpecPrior == True):
 
-
-			#block_size = 128
-			#grid_size = int(np.ceil(self.NToAs*1.0/block_size))
-
-			#self.GPUGetBaselineGrads(self.gpu_NResVec, self.BaselineNoiseSignal_GPU, self.BaselineNoiseAmps_GPU, self.BaselineNoiseSpecs_GPU, self.BaselineNoiseLike_GPU, Step, np.int32(self.NToAs), np.int32(self.NFBasis), np.int32(self.BaselineNoiseRefFreq), grid=(grid_size,1), block=(block_size,1,1))
-
-
-			if(self.fitBaselineNoiseAmpPrior == True):
-
-				index=self.ParamDict['BaselineNoiseAmpPrior'][0]
-                                grad[index:index+self.NToAs] = self.BaselineNoiseAmps_GPU.get()
-				
-				'''
-				if(self.fitPNoise == False):
-					RVec = self.gpu_ResVec.get()[:,:,0]
-					NVec = self.gpu_NResVec.get()[:,0,:]
-
-				index=self.ParamDict['BaselineNoiseAmpPrior'][0]
-
-				for i in range(self.NToAs):
-					BLRefF = self.BaselineNoiseRefFreq
-                                        BLNFreqs = np.zeros(2*self.NFBasis)
-                                        BLNFreqs[:self.NFBasis] = (np.linspace(1,self.NFBasis,self.NFBasis)/BLRefF)
-                                        BLNFreqs[self.NFBasis:] = (np.linspace(1,self.NFBasis,self.NFBasis)/BLRefF)
-
-                                        Amp=10.0**(2*BaselineNoisePriorAmps[i])
-                                        Spec = BaselineNoisePriorSpecs[i]
-                                        BLNPower = Amp*pow(BLNFreqs, -Spec)
-
-                                        BLNPower[self.NFBasis-5:self.NFBasis] = 0
-                                        BLNPower[-5:] = 0
-
-					Top = np.log(10.0)*BLNPower
-
-                                        NGrad = np.sum((Top/(BLNPower + ProfileNoise[i]))*(1 - RVec[i]*NVec[i]))
-
-					grad[index+i] = NGrad
-				'''
-
-			if(self.fitBaselineNoiseSpecPrior == True):
-
-				index=self.ParamDict['BaselineNoiseSpecPrior'][0]
-				grad[index:index+self.NToAs] = self.BaselineNoiseSpecs_GPU.get()
-
-				'''
-                                if(self.fitPNoise == False and self.fitBaselineNoiseAmpPrior == False):
-                                        RVec = self.gpu_ResVec.get()[:,:,0]
-                                        NVec = self.gpu_NResVec.get()[:,0,:]
-
-				index=self.ParamDict['BaselineNoiseSpecPrior'][0]
-
-                                for i in range(self.NToAs):
-                                        BLRefF = self.BaselineNoiseRefFreq
-                                        BLNFreqs = np.zeros(2*self.NFBasis)
-                                        BLNFreqs[:self.NFBasis] = (np.linspace(1,self.NFBasis,self.NFBasis)/BLRefF)
-                                        BLNFreqs[self.NFBasis:] = (np.linspace(1,self.NFBasis,self.NFBasis)/BLRefF)
-
-                                        Amp=10.0**(2*BaselineNoisePriorAmps[i])
-                                        Spec = BaselineNoisePriorSpecs[i]
-                                        BLNPower = Amp*pow(BLNFreqs, -Spec)
-
-                                        BLNPower[self.NFBasis-5:self.NFBasis] = 0
-                                        BLNPower[-5:] = 0
-
-                                        Top = -0.5*np.log(BLNFreqs)*BLNPower
-
-                                        NGrad = np.sum((Top/(BLNPower + ProfileNoise[i]))*(1 - RVec[i]*NVec[i]))
-
-                                        grad[index+i] = NGrad
-				'''
-
-		#block_size = 128
-                #grid_size = int(np.ceil(self.NToAs*1.0/block_size))
-		#self.GPUGetBaselineGrads(self.gpu_ResVec, self.gpu_NResVec, self.gpu_RolledData, self.Signal_GPU, gpu_Amps, gpu_Noise, self.gpu_ToAIndex, self.gpu_SignalIndex, TotBins, np.int32(self.NFBasis), self.BaselineNoiseAmps_GPU, self.BaselineNoiseSpecs_GPU, self.BaselineNoiseLike_GPU, np.int32(self.BaselineNoiseRefFreq), np.int32(self.NToAs), grid=(grid_size,1), block=(block_size,1,1))	
 
 			#block_size = 128
 			#grid_size = int(np.ceil(self.NToAs*1.0/block_size))
