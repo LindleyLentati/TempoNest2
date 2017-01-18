@@ -4362,8 +4362,7 @@ class Likelihood(object):
 
 	
 		if(MLAmpPrior == None):
-			MLP = np.ones(self.NToAs)
-			MLP[:self.NToAs] *= -1
+			MLP = np.log10(self.ProfileInfo[:,6]*np.sqrt(self.Nbins))
 			self.MLParameters.append(MLP)
 		else:
 			self.MLParameters.append(MLAmpPrior)
@@ -4414,6 +4413,15 @@ class Likelihood(object):
 	
 		return
 
+
+	def removeBaselineNoise():
+		self.incBaselineNoise = False
+		self.incBaselineNoise = False
+		self.BaselineNoisePrior = None
+		self.fitBaselineNoiseAmpPrior = False
+		self.fitBaselineNoiseSpecPrior = False
+		self.BaselineNoiseParams = None
+		self.BaselineNoiseRefFreq = 1
 
 	def SimArchives(self, ML, addNoise = False, outDir="./SimProfs", calcAmps=False, calcNoise=False, ASCII = True, TimeDomain = False):
 
