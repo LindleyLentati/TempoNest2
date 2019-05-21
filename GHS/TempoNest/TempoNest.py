@@ -3496,13 +3496,13 @@ class Likelihood(object):
 			ProfileAmps = params[pcount:pcount+self.NToAs]
 			pcount += self.NToAs
 		else:
-			ProfileAmps = self.MLParams[0:self.NToAs]
+			ProfileAmps = self.MLParameters[0:self.NToAs]
 
 		if(self.fitPNoise == True):
 			ProfileNoise = params[pcount:pcount+self.NToAs]*params[pcount:pcount+self.NToAs]
 			pcount += self.NToAs
 		else:
-			ProfileNoise = self.MLParams[self.NToAs:2*self.NToAs]*self.MLParams[self.NToAs:2*self.NToAs]
+			ProfileNoise = self.MLParameters[self.NToAs:2*self.NToAs]*self.MLParameters[self.NToAs:2*self.NToAs]
 
 
 		if(self.fitPhase == True):
@@ -3532,7 +3532,7 @@ class Likelihood(object):
 			ScatteringParameters = 10.0**params[pcount:pcount+self.NScatterEpochs]
 			pcount += self.NScatterEpochs
 		else:
-			ScatteringParameters = 10.0**self.MLParams[-self.NScatterEpochs:]
+			ScatteringParameters = 10.0**self.MLParameters[-self.NScatterEpochs:]
 
 
 		TimeSignal = np.dot(self.designMatrix, TimingParameters)
@@ -4017,7 +4017,7 @@ class Likelihood(object):
 		else:
 			self.MLParameters.append(ML)
 
-	def addPhase(self, Fit = True, ML = None, write=True):
+	def addPhase(self, Fit = True, ML = np.nan, write=True):
 		self.incPhase = True
 		self.fitPhase = Fit
 
@@ -4042,12 +4042,12 @@ class Likelihood(object):
 			
 			self.parameters.append('Phase')
 		#print "MeanPhase", self.MeanPhase, ML, np.array([ML])
-		if(ML == None):
+		if(np.isnan(ML)):
 			self.MLParameters.append(np.array([self.MeanPhase]))
 		else:
 			self.MLParameters.append(np.array([ML]))
 	
-	def addLinearTM(self, Fit = True, ML = None, write=True):
+	def addLinearTM(self, Fit = True, ML = np.array([]),  write=True):
 
 		self.incLinearTM = True
 		self.fitLinearTM = Fit
@@ -4072,12 +4072,12 @@ class Likelihood(object):
 					self.ParametersToWrite.append(len(self.parameters))
 				self.parameters.append(self.psr.pars()[i])
 
-		if(ML == None):
+		if(len(ML) == 0):
 			ML = np.zeros(self.numTime)
 
 		self.MLParameters.append(ML)
 	
-	def addProfile(self, Fit = True, ML = None, write=True):
+	def addProfile(self, Fit = True, ML = np.array([]), write=True):
 
 		self.incProfile = True
 		self.fitProfile = Fit
@@ -4103,7 +4103,7 @@ class Likelihood(object):
 						self.ParametersToWrite.append(len(self.parameters))
 					self.parameters.append('S'+str(i+1)+'E'+str(j))
 
-		if(ML == None):
+		if(len(ML) == 0):
 			ML = self.MLShapeCoeff
 
 	
